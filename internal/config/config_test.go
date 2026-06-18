@@ -15,6 +15,7 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	t.Setenv("CUEFORGE_VMODEL", " vision-test ")
 	t.Setenv("CUEFORGE_REASONING_EFFORT", " medium ")
 	t.Setenv("CUEFORGE_REQUEST_TIMEOUT", "90s")
+	t.Setenv("CUEFORGE_CONCURRENCY", "3")
 
 	cfg, err := Load()
 	if err != nil {
@@ -37,5 +38,18 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	}
 	if cfg.RequestTimeout != 90*time.Second {
 		t.Fatalf("RequestTimeout = %s, want 90s", cfg.RequestTimeout)
+	}
+	if cfg.Concurrency != 3 {
+		t.Fatalf("Concurrency = %d, want 3", cfg.Concurrency)
+	}
+}
+
+func TestLoadRejectsInvalidConcurrency(t *testing.T) {
+	t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
+	t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
+	t.Setenv("CUEFORGE_CONCURRENCY", "0")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load succeeded, want invalid concurrency error")
 	}
 }

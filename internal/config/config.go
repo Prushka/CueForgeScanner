@@ -20,6 +20,7 @@ type Config struct {
 	VisionModel     string        `json:"vision_model" env:"CUEFORGE_VMODEL"`
 	ReasoningEffort string        `json:"reasoning_effort" env:"CUEFORGE_REASONING_EFFORT"`
 	RequestTimeout  time.Duration `json:"request_timeout" env:"CUEFORGE_REQUEST_TIMEOUT" envDefault:"0s"`
+	Concurrency     int           `json:"concurrency" env:"CUEFORGE_CONCURRENCY" envDefault:"1"`
 }
 
 func Load() (Config, error) {
@@ -70,6 +71,9 @@ func normalize(cfg *Config) error {
 	}
 	if cfg.RequestTimeout < 0 {
 		return errors.New("CUEFORGE_REQUEST_TIMEOUT cannot be negative")
+	}
+	if cfg.Concurrency < 1 {
+		return errors.New("CUEFORGE_CONCURRENCY must be at least 1")
 	}
 	return nil
 }

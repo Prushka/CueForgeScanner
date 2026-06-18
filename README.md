@@ -18,6 +18,7 @@ The scanner is configured with environment variables:
 | `CUEFORGE_VMODEL`           | No       |                                   | Optional CueForge `vmodel` form field.                                                                                          |
 | `CUEFORGE_REASONING_EFFORT` | No       |                                   | Optional CueForge `reasoning_effort` form field.                                                                                |
 | `CUEFORGE_REQUEST_TIMEOUT`  | No       | no timeout                        | Request timeout as a Go duration such as `30m` or `1800s`.                                                                      |
+| `CUEFORGE_CONCURRENCY`      | No       | `1`                               | Maximum number of folders processed concurrently.                                                                                |
 
 ## Usage
 
@@ -25,10 +26,11 @@ The scanner is configured with environment variables:
 CUEFORGE_INPUT_LANGUAGES='eng,ger,chi' \
 CUEFORGE_TARGET_LANGUAGES='chi,$jpn' \
 CUEFORGE_REASONING_EFFORT=medium \
+CUEFORGE_CONCURRENCY=2 \
 go run ./cmd/scanner
 ```
 
-The scanner processes child folders from newest to oldest by folder modification time. It uploads only the selected `.ass` subtitle and always requests `ass` and `vtt` output formats from CueForge. If a folder has a readable `job.json` with `media.title`, that title is sent as CueForge's `media` form field for translations from that folder.
+The scanner processes child folders from newest to oldest by folder modification time, with up to `CUEFORGE_CONCURRENCY` folders active at once. It uploads only the selected `.ass` subtitle and always requests `ass` and `vtt` output formats from CueForge. If a folder has a readable `job.json` with `media.title`, that title is sent as CueForge's `media` form field for translations from that folder.
 
 For a target such as `jpn`, files are written as:
 

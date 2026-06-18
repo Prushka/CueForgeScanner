@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +74,55 @@ func TestListScanFoldersSortsByLatestModTimeFirst(t *testing.T) {
 	want := []string{"newer", "alpha", "beta", "older"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("listScanFolders = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunLimitsConcurrentFolderProcessing(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 5; i++ {
+		folder := filepath.Join(dir, fmt.Sprintf("folder-%d", i))
+		if err := os.Mkdir(folder, 0o755); err != nil {
+			t.Fatalf("Mkdir(%s) failed: %v", folder, err)
+		}
+		writeTestFile(t, filepath.Join(folder, "1-eng.ass"), "subtitle")
+	}
+
+	var currentRequests int64
+	var maxRequests int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/translate" {
+			http.NotFound(w, r)
+			return
+		}
+
+		active := atomic.AddInt64(&currentRequests, 1)
+		defer atomic.AddInt64(&currentRequests, -1)
+		updateMaxInt64(&maxRequests, active)
+		time.Sleep(50 * time.Millisecond)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "plain ass"},
+				{Format: "vtt", Variant: "translated", Content: "plain vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := config.Config{
+		ScanDir:         dir,
+		CueForgeBaseURL: server.URL,
+		InputLanguages:  []string{"eng"},
+		TargetLanguages: []string{"jpn"},
+		Concurrency:     2,
+	}
+
+	if err := Run(context.Background(), server.Client(), rand.New(rand.NewSource(1)), cfg, mustRegistry(t)); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if got := atomic.LoadInt64(&maxRequests); got != 2 {
+		t.Fatalf("max concurrent translate requests = %d, want 2", got)
 	}
 }
 
@@ -204,6 +255,51 @@ func TestMediaTitleFromJob(t *testing.T) {
 	}
 }
 
+func TestTargetLogFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		target targetLanguage
+		want   string
+	}{
+		{
+			name:   "plain target",
+			target: targetLanguage{RequestValue: "jpn", OutputID: "jpn"},
+			want:   "target=jpn annotation=off",
+		},
+		{
+			name:   "annotated target",
+			target: targetLanguage{RequestValue: "jpn", OutputID: "jpn", Annotate: true},
+			want:   "target=jpn annotation=on",
+		},
+		{
+			name:   "alias target",
+			target: targetLanguage{RequestValue: "French", OutputID: "fre"},
+			want:   `target=fre request_target="French" annotation=off`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := targetLogFields(tt.target); got != tt.want {
+				t.Fatalf("targetLogFields = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOutputFileNames(t *testing.T) {
+	got := outputFileNames(targetLanguage{OutputID: "jpn", Annotate: true})
+	want := []string{
+		"cueforge_jpn.ass",
+		"cueforge_jpn.vtt",
+		"cueforge_jpn_annotated.ass",
+		"cueforge_jpn_annotated.vtt",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("outputFileNames = %#v, want %#v", got, want)
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -215,6 +311,15 @@ func setDirModTime(t *testing.T, path string, modTime time.Time) {
 	t.Helper()
 	if err := os.Chtimes(path, modTime, modTime); err != nil {
 		t.Fatalf("Chtimes(%s) failed: %v", path, err)
+	}
+}
+
+func updateMaxInt64(target *int64, value int64) {
+	for {
+		current := atomic.LoadInt64(target)
+		if value <= current || atomic.CompareAndSwapInt64(target, current, value) {
+			return
+		}
 	}
 }
 

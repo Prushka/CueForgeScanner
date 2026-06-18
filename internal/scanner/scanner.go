@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"CueForgeScanner/internal/config"
@@ -68,6 +69,31 @@ type scanFolder struct {
 	ModTime time.Time
 }
 
+type folderTask struct {
+	Index  int
+	Folder scanFolder
+}
+
+type folderResult struct {
+	Index  int
+	Errors []error
+}
+
+type lockedRand struct {
+	mu  sync.Mutex
+	rng *rand.Rand
+}
+
+func newLockedRand(rng *rand.Rand) *lockedRand {
+	return &lockedRand{rng: rng}
+}
+
+func (r *lockedRand) Intn(n int) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rng.Intn(n)
+}
+
 func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Config, languages cueforge.Registry) error {
 	inputLanguages, err := resolveInputLanguages(cfg.InputLanguages, languages)
 	if err != nil {
@@ -83,28 +109,11 @@ func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Co
 		return err
 	}
 
-	var failures []error
-	for _, folder := range folders {
-		input, err := chooseInputSubtitle(folder.Path, inputLanguages, languages, rng)
-		if err != nil {
-			if errors.Is(err, errNoASSSubtitles) {
-				log.Printf("skip %s: no original .ass subtitles found", folder.Path)
-				continue
-			}
-			failures = append(failures, err)
-			continue
-		}
+	results := processFolders(ctx, client, newLockedRand(rng), cfg, languages, inputLanguages, targetLanguages, folders)
 
-		mediaTitle := mediaTitleFromJob(folder.Path)
-		log.Printf("folder %s: selected %s", folder.Name, input.Name)
-		for _, target := range targetLanguages {
-			if err := translateTarget(ctx, client, cfg, folder.Path, mediaTitle, input, target); err != nil {
-				failures = append(failures, fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err))
-				log.Printf("failed %s -> %s: %v", folder.Name, target.OutputID, err)
-				continue
-			}
-			log.Printf("folder %s: wrote cueforge_%s outputs", folder.Name, target.OutputID)
-		}
+	var failures []error
+	for _, result := range results {
+		failures = append(failures, result.Errors...)
 	}
 
 	if len(failures) > 0 {
@@ -114,6 +123,85 @@ func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Co
 }
 
 var errNoASSSubtitles = errors.New("no original .ass subtitles found")
+
+func processFolders(ctx context.Context, client *http.Client, rng *lockedRand, cfg config.Config, languages cueforge.Registry, inputLanguages []inputLanguage, targetLanguages []targetLanguage, folders []scanFolder) []folderResult {
+	if len(folders) == 0 {
+		return nil
+	}
+
+	workerCount := cfg.Concurrency
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if workerCount > len(folders) {
+		workerCount = len(folders)
+	}
+
+	tasks := make(chan folderTask)
+	results := make(chan folderResult, len(folders))
+	var wg sync.WaitGroup
+	for worker := 0; worker < workerCount; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range tasks {
+				results <- folderResult{
+					Index:  task.Index,
+					Errors: processFolder(ctx, client, rng, cfg, languages, inputLanguages, targetLanguages, task.Folder),
+				}
+			}
+		}()
+	}
+
+	for i, folder := range folders {
+		tasks <- folderTask{Index: i, Folder: folder}
+	}
+	close(tasks)
+	wg.Wait()
+	close(results)
+
+	out := make([]folderResult, 0, len(folders))
+	for result := range results {
+		out = append(out, result)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Index < out[j].Index
+	})
+	return out
+}
+
+func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cfg config.Config, languages cueforge.Registry, inputLanguages []inputLanguage, targetLanguages []targetLanguage, folder scanFolder) []error {
+	input, err := chooseInputSubtitle(folder.Path, inputLanguages, languages, rng)
+	if err != nil {
+		if errors.Is(err, errNoASSSubtitles) {
+			log.Printf("skip %s: no original .ass subtitles found", folder.Path)
+			return nil
+		}
+		return []error{err}
+	}
+
+	var failures []error
+	mediaTitle := mediaTitleFromJob(folder.Path)
+	if mediaTitle != "" {
+		log.Printf("folder %s: selected input=%s input_language=%s media=%q targets=%d", folder.Name, input.Name, inputLanguageLogValue(input), mediaTitle, len(targetLanguages))
+	} else {
+		log.Printf("folder %s: selected input=%s input_language=%s targets=%d", folder.Name, input.Name, inputLanguageLogValue(input), len(targetLanguages))
+	}
+	for _, target := range targetLanguages {
+		targetFields := targetLogFields(target)
+		log.Printf("folder %s: translating input=%s input_language=%s %s", folder.Name, input.Name, inputLanguageLogValue(input), targetFields)
+		if err := translateTarget(ctx, client, cfg, folder.Path, mediaTitle, input, target); err != nil {
+			failures = append(failures, fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err))
+			log.Printf("folder %s: failed input=%s %s: %v", folder.Name, input.Name, targetFields, err)
+			continue
+		}
+		log.Printf("folder %s: wrote outputs %s files=%s", folder.Name, targetFields, strings.Join(outputFileNames(target), ","))
+	}
+	if len(failures) > 0 {
+		return failures
+	}
+	return nil
+}
 
 func listScanFolders(scanDir string) ([]scanFolder, error) {
 	entries, err := os.ReadDir(scanDir)
@@ -146,7 +234,42 @@ func listScanFolders(scanDir string) ([]scanFolder, error) {
 	return folders, nil
 }
 
-func chooseInputSubtitle(folder string, priorities []inputLanguage, languages cueforge.Registry, rng *rand.Rand) (subtitleCandidate, error) {
+func inputLanguageLogValue(input subtitleCandidate) string {
+	if input.LanguageID == "" {
+		return "unknown"
+	}
+	if input.Language == nil {
+		return input.LanguageID + " (unrecognized)"
+	}
+	return input.LanguageID
+}
+
+func targetLogFields(target targetLanguage) string {
+	annotation := "off"
+	if target.Annotate {
+		annotation = "on"
+	}
+	if target.RequestValue == target.OutputID {
+		return fmt.Sprintf("target=%s annotation=%s", target.OutputID, annotation)
+	}
+	return fmt.Sprintf("target=%s request_target=%q annotation=%s", target.OutputID, target.RequestValue, annotation)
+}
+
+func outputFileNames(target targetLanguage) []string {
+	names := []string{
+		fmt.Sprintf("cueforge_%s.ass", target.OutputID),
+		fmt.Sprintf("cueforge_%s.vtt", target.OutputID),
+	}
+	if target.Annotate {
+		names = append(names,
+			fmt.Sprintf("cueforge_%s_annotated.ass", target.OutputID),
+			fmt.Sprintf("cueforge_%s_annotated.vtt", target.OutputID),
+		)
+	}
+	return names
+}
+
+func chooseInputSubtitle(folder string, priorities []inputLanguage, languages cueforge.Registry, rng interface{ Intn(int) int }) (subtitleCandidate, error) {
 	candidates, err := listASSCandidates(folder, languages)
 	if err != nil {
 		return subtitleCandidate{}, err
