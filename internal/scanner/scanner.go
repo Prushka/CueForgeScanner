@@ -25,11 +25,20 @@ import (
 
 var languageIDPattern = regexp.MustCompile(`^[A-Za-z]{3}$`)
 
+var supportedInputSubtitleExtensions = map[string]int{
+	".ass": 0,
+	".vtt": 1,
+	".sup": 2,
+	".sub": 3,
+}
+
 type subtitleCandidate struct {
 	Path       string
 	Name       string
 	LanguageID string
 	Language   *cueforge.Language
+	IdxPath    string
+	IdxName    string
 }
 
 type inputLanguage struct {
@@ -48,11 +57,12 @@ type translateResponse struct {
 }
 
 type translateOutput struct {
-	Filename  string `json:"filename"`
-	Format    string `json:"format"`
-	Variant   string `json:"variant"`
-	Annotated bool   `json:"annotated"`
-	Content   string `json:"content"`
+	Filename    string `json:"filename"`
+	Format      string `json:"format"`
+	Variant     string `json:"variant"`
+	Annotated   bool   `json:"annotated"`
+	OCROriginal bool   `json:"ocr_original"`
+	Content     string `json:"content"`
 }
 
 type jobMetadata struct {
@@ -122,7 +132,7 @@ func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Co
 	return nil
 }
 
-var errNoASSSubtitles = errors.New("no original .ass subtitles found")
+var errNoSupportedSubtitles = errors.New("no supported original subtitles found")
 
 func processFolders(ctx context.Context, client *http.Client, rng *lockedRand, cfg config.Config, languages cueforge.Registry, inputLanguages []inputLanguage, targetLanguages []targetLanguage, folders []scanFolder) []folderResult {
 	if len(folders) == 0 {
@@ -173,8 +183,8 @@ func processFolders(ctx context.Context, client *http.Client, rng *lockedRand, c
 func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cfg config.Config, languages cueforge.Registry, inputLanguages []inputLanguage, targetLanguages []targetLanguage, folder scanFolder) []error {
 	input, err := chooseInputSubtitle(folder.Path, inputLanguages, languages, rng)
 	if err != nil {
-		if errors.Is(err, errNoASSSubtitles) {
-			log.Printf("skip %s: no original .ass subtitles found", folder.Path)
+		if errors.Is(err, errNoSupportedSubtitles) {
+			log.Printf("skip %s: no supported original subtitles found", folder.Path)
 			return nil
 		}
 		return []error{err}
@@ -189,13 +199,18 @@ func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cf
 	}
 	for _, target := range targetLanguages {
 		targetFields := targetLogFields(target)
+		expectedFiles := expectedOutputFileNames(input, target)
+		if allOutputFilesExist(folder.Path, expectedFiles) {
+			log.Printf("folder %s: skipping existing outputs %s files=%s", folder.Name, targetFields, strings.Join(expectedFiles, ","))
+			continue
+		}
 		log.Printf("folder %s: translating input=%s input_language=%s %s", folder.Name, input.Name, inputLanguageLogValue(input), targetFields)
 		if err := translateTarget(ctx, client, cfg, folder.Path, mediaTitle, input, target); err != nil {
 			failures = append(failures, fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err))
 			log.Printf("folder %s: failed input=%s %s: %v", folder.Name, input.Name, targetFields, err)
 			continue
 		}
-		log.Printf("folder %s: wrote outputs %s files=%s", folder.Name, targetFields, strings.Join(outputFileNames(target), ","))
+		log.Printf("folder %s: wrote outputs %s files=%s", folder.Name, targetFields, strings.Join(expectedFiles, ","))
 	}
 	if len(failures) > 0 {
 		return failures
@@ -255,27 +270,74 @@ func targetLogFields(target targetLanguage) string {
 	return fmt.Sprintf("target=%s request_target=%q annotation=%s", target.OutputID, target.RequestValue, annotation)
 }
 
-func outputFileNames(target targetLanguage) []string {
-	names := []string{
+func expectedOutputFileNames(input subtitleCandidate, target targetLanguage) []string {
+	var names []string
+	names = appendUnique(names,
 		fmt.Sprintf("cueforge_%s.ass", target.OutputID),
 		fmt.Sprintf("cueforge_%s.vtt", target.OutputID),
-	}
+	)
 	if target.Annotate {
-		names = append(names,
+		names = appendUnique(names,
 			fmt.Sprintf("cueforge_%s_annotated.ass", target.OutputID),
 			fmt.Sprintf("cueforge_%s_annotated.vtt", target.OutputID),
+		)
+	}
+	if inputNeedsOCROriginalOutputs(input) {
+		names = appendUnique(names,
+			fmt.Sprintf("cueforge_%s.ass", input.LanguageID),
+			fmt.Sprintf("cueforge_%s.vtt", input.LanguageID),
 		)
 	}
 	return names
 }
 
+func appendUnique(values []string, next ...string) []string {
+	for _, value := range next {
+		found := false
+		for _, existing := range values {
+			if existing == value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func allOutputFilesExist(folder string, names []string) bool {
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(folder, name)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func inputNeedsOCROriginalOutputs(input subtitleCandidate) bool {
+	switch strings.ToLower(filepath.Ext(input.Name)) {
+	case ".sup":
+		return input.LanguageID != ""
+	case ".sub":
+		return input.LanguageID != "" && input.IdxPath != ""
+	default:
+		return false
+	}
+}
+
+func matchingVobSubIndexPath(inputPath string) string {
+	return strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".idx"
+}
+
 func chooseInputSubtitle(folder string, priorities []inputLanguage, languages cueforge.Registry, rng interface{ Intn(int) int }) (subtitleCandidate, error) {
-	candidates, err := listASSCandidates(folder, languages)
+	candidates, err := listSubtitleCandidates(folder, languages)
 	if err != nil {
 		return subtitleCandidate{}, err
 	}
 	if len(candidates) == 0 {
-		return subtitleCandidate{}, errNoASSSubtitles
+		return subtitleCandidate{}, errNoSupportedSubtitles
 	}
 
 	for _, priority := range priorities {
@@ -291,7 +353,7 @@ func chooseInputSubtitle(folder string, priorities []inputLanguage, languages cu
 	return candidates[rng.Intn(len(candidates))], nil
 }
 
-func listASSCandidates(folder string, languages cueforge.Registry) ([]subtitleCandidate, error) {
+func listSubtitleCandidates(folder string, languages cueforge.Registry) ([]subtitleCandidate, error) {
 	entries, err := os.ReadDir(folder)
 	if err != nil {
 		return nil, fmt.Errorf("read folder %s: %w", folder, err)
@@ -303,8 +365,8 @@ func listASSCandidates(folder string, languages cueforge.Registry) ([]subtitleCa
 			continue
 		}
 		name := entry.Name()
-		lowerName := strings.ToLower(name)
-		if !strings.HasSuffix(lowerName, ".ass") || strings.HasPrefix(lowerName, "cueforge_") {
+		ext := strings.ToLower(filepath.Ext(name))
+		if _, ok := supportedInputSubtitleExtensions[ext]; !ok || strings.HasPrefix(strings.ToLower(name), "cueforge_") {
 			continue
 		}
 
@@ -313,15 +375,28 @@ func listASSCandidates(folder string, languages cueforge.Registry) ([]subtitleCa
 		if resolved, ok := languages.Resolve(langID); ok {
 			lang = &resolved
 		}
-		candidates = append(candidates, subtitleCandidate{
+		candidate := subtitleCandidate{
 			Path:       filepath.Join(folder, name),
 			Name:       name,
 			LanguageID: langID,
 			Language:   lang,
-		})
+		}
+		if ext == ".sub" {
+			idxPath := matchingVobSubIndexPath(candidate.Path)
+			if _, err := os.Stat(idxPath); err == nil {
+				candidate.IdxPath = idxPath
+				candidate.IdxName = filepath.Base(idxPath)
+			}
+		}
+		candidates = append(candidates, candidate)
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
+		iExt := supportedInputSubtitleExtensions[strings.ToLower(filepath.Ext(candidates[i].Name))]
+		jExt := supportedInputSubtitleExtensions[strings.ToLower(filepath.Ext(candidates[j].Name))]
+		if iExt != jExt {
+			return iExt < jExt
+		}
 		return candidates[i].Name < candidates[j].Name
 	})
 	return candidates, nil
@@ -361,7 +436,7 @@ func translateTarget(ctx context.Context, client *http.Client, cfg config.Config
 		return errors.New("translate response did not include outputs")
 	}
 
-	if err := saveTargetOutputs(folder, target, decoded.Outputs); err != nil {
+	if err := saveTargetOutputs(folder, input, target, decoded.Outputs); err != nil {
 		return err
 	}
 	return nil
@@ -427,13 +502,29 @@ func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg c
 		return nil, "", fmt.Errorf("write file part: %w", err)
 	}
 
+	if input.IdxPath != "" {
+		idxFile, err := os.Open(input.IdxPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("open VobSub index %s: %w", input.IdxPath, err)
+		}
+		defer idxFile.Close()
+
+		idxPart, err := writer.CreateFormFile("idx", input.IdxName)
+		if err != nil {
+			return nil, "", fmt.Errorf("create idx part: %w", err)
+		}
+		if _, err := io.Copy(idxPart, idxFile); err != nil {
+			return nil, "", fmt.Errorf("write idx part: %w", err)
+		}
+	}
+
 	if err := writer.Close(); err != nil {
 		return nil, "", fmt.Errorf("close multipart writer: %w", err)
 	}
 	return &body, writer.FormDataContentType(), nil
 }
 
-func saveTargetOutputs(folder string, target targetLanguage, outputs []translateOutput) error {
+func saveTargetOutputs(folder string, input subtitleCandidate, target targetLanguage, outputs []translateOutput) error {
 	found := map[string]bool{}
 	for _, output := range outputs {
 		format := strings.ToLower(strings.TrimSpace(output.Format))
@@ -442,13 +533,20 @@ func saveTargetOutputs(folder string, target targetLanguage, outputs []translate
 		}
 
 		var name string
-		if output.Annotated || output.Variant == "annotated" {
+		switch {
+		case output.OCROriginal || output.Variant == "ocr_original":
+			if input.LanguageID == "" {
+				continue
+			}
+			name = fmt.Sprintf("cueforge_%s.%s", input.LanguageID, format)
+			found["ocr:"+format] = true
+		case output.Annotated || output.Variant == "annotated":
 			name = fmt.Sprintf("cueforge_%s_annotated.%s", target.OutputID, format)
 			found["annotated:"+format] = true
-		} else if output.Variant == "" || output.Variant == "translated" {
+		case output.Variant == "" || output.Variant == "translated":
 			name = fmt.Sprintf("cueforge_%s.%s", target.OutputID, format)
 			found["translated:"+format] = true
-		} else {
+		default:
 			continue
 		}
 
@@ -458,6 +556,9 @@ func saveTargetOutputs(folder string, target targetLanguage, outputs []translate
 	}
 
 	for _, format := range []string{"ass", "vtt"} {
+		if inputNeedsOCROriginalOutputs(input) && !found["ocr:"+format] {
+			return fmt.Errorf("translate response missing OCR original %s output", format)
+		}
 		if !found["translated:"+format] {
 			return fmt.Errorf("translate response missing translated %s output", format)
 		}

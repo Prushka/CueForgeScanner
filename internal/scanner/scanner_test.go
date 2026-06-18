@@ -24,6 +24,7 @@ func TestChooseInputSubtitleUsesPriorityAliases(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "english")
 	writeTestFile(t, filepath.Join(dir, "2-deu.ass"), "german")
+	writeTestFile(t, filepath.Join(dir, "4-eng.sup"), "english image")
 	writeTestFile(t, filepath.Join(dir, "cueforge_eng.ass"), "generated")
 	writeTestFile(t, filepath.Join(dir, "3-fra.vtt"), "vtt")
 
@@ -39,6 +40,47 @@ func TestChooseInputSubtitleUsesPriorityAliases(t *testing.T) {
 	}
 	if selected.Name != "2-deu.ass" {
 		t.Fatalf("selected %q, want 2-deu.ass", selected.Name)
+	}
+}
+
+func TestChooseInputSubtitleUsesFormatOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "2-eng.ass"), "ass subtitle")
+	writeTestFile(t, filepath.Join(dir, "4-eng.sup"), "image subtitle")
+	writeTestFile(t, filepath.Join(dir, "3-eng.vtt"), "vtt subtitle")
+	writeTestFile(t, filepath.Join(dir, "5-eng.sub"), "sub subtitle")
+
+	priorities := []inputLanguage{
+		{Raw: "eng", IDs: map[string]struct{}{"eng": {}}},
+	}
+
+	selected, err := chooseInputSubtitle(dir, priorities, mustRegistry(t), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("chooseInputSubtitle failed: %v", err)
+	}
+	if selected.Name != "2-eng.ass" {
+		t.Fatalf("selected %q, want 2-eng.ass", selected.Name)
+	}
+}
+
+func TestChooseInputSubtitleAttachesVobSubIndex(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "5-eng.sub"), "sub subtitle")
+	writeTestFile(t, filepath.Join(dir, "5-eng.idx"), "idx subtitle")
+
+	priorities := []inputLanguage{
+		{Raw: "eng", IDs: map[string]struct{}{"eng": {}}},
+	}
+
+	selected, err := chooseInputSubtitle(dir, priorities, mustRegistry(t), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("chooseInputSubtitle failed: %v", err)
+	}
+	if selected.Name != "5-eng.sub" {
+		t.Fatalf("selected %q, want 5-eng.sub", selected.Name)
+	}
+	if selected.IdxName != "5-eng.idx" || selected.IdxPath != filepath.Join(dir, "5-eng.idx") {
+		t.Fatalf("selected idx = (%q, %q), want 5-eng.idx sidecar", selected.IdxName, selected.IdxPath)
 	}
 }
 
@@ -124,6 +166,57 @@ func TestRunLimitsConcurrentFolderProcessing(t *testing.T) {
 	if got := atomic.LoadInt64(&maxRequests); got != 2 {
 		t.Fatalf("max concurrent translate requests = %d, want 2", got)
 	}
+}
+
+func TestRunSkipsTargetWhenAllExpectedOutputsExist(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
+	for _, name := range expectedOutputFileNames(subtitleCandidate{Name: "1-eng.ass", LanguageID: "eng"}, targetLanguage{OutputID: "jpn", Annotate: true}) {
+		writeTestFile(t, filepath.Join(dir, name), "existing")
+	}
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		t.Fatalf("unexpected request to %s", r.URL.Path)
+	}))
+	defer server.Close()
+
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn", Annotate: true}}, scanFolder{Name: "episode", Path: dir})
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 0 {
+		t.Fatalf("requests = %d, want 0", got)
+	}
+}
+
+func TestRunDoesNotSkipWhenExpectedOutputIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
+	writeTestFile(t, filepath.Join(dir, "cueforge_jpn.ass"), "existing")
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "new ass"},
+				{Format: "vtt", Variant: "translated", Content: "new vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn"}}, scanFolder{Name: "episode", Path: dir})
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "new vtt")
 }
 
 func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
@@ -213,6 +306,112 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn_annotated.vtt"), "annotated vtt")
 }
 
+func TestTranslateTargetSavesOCROriginalOutputsForImageInput(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "4-eng.sup")
+	writeTestFile(t, inputPath, "image subtitle")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile failed: %v", err)
+		}
+		defer file.Close()
+		if header.Filename != "4-eng.sup" {
+			t.Fatalf("uploaded filename = %q, want 4-eng.sup", header.Filename)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "translated ass"},
+				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
+				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	registry := mustRegistry(t)
+	lang, ok := registry.Resolve("eng")
+	if !ok {
+		t.Fatal("Resolve(eng) failed")
+	}
+	input := subtitleCandidate{
+		Path:       inputPath,
+		Name:       "4-eng.sup",
+		LanguageID: "eng",
+		Language:   &lang,
+	}
+	cfg := config.Config{CueForgeBaseURL: server.URL}
+	target := targetLanguage{RequestValue: "jpn", OutputID: "jpn"}
+
+	if err := translateTarget(context.Background(), server.Client(), cfg, dir, "", input, target); err != nil {
+		t.Fatalf("translateTarget failed: %v", err)
+	}
+
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.vtt"), "ocr vtt")
+}
+
+func TestTranslateTargetSendsVobSubIndexAndSavesOCROriginalOutputs(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "5-eng.sub")
+	idxPath := filepath.Join(dir, "5-eng.idx")
+	writeTestFile(t, inputPath, "binary subtitle")
+	writeTestFile(t, idxPath, "IDX")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		if _, _, err := r.FormFile("idx"); err != nil {
+			t.Fatalf("expected idx multipart file: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "translated ass"},
+				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
+				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	registry := mustRegistry(t)
+	lang, ok := registry.Resolve("eng")
+	if !ok {
+		t.Fatal("Resolve(eng) failed")
+	}
+	input := subtitleCandidate{
+		Path:       inputPath,
+		Name:       "5-eng.sub",
+		LanguageID: "eng",
+		Language:   &lang,
+		IdxPath:    idxPath,
+		IdxName:    "5-eng.idx",
+	}
+	cfg := config.Config{CueForgeBaseURL: server.URL}
+	target := targetLanguage{RequestValue: "jpn", OutputID: "jpn"}
+
+	if err := translateTarget(context.Background(), server.Client(), cfg, dir, "", input, target); err != nil {
+		t.Fatalf("translateTarget failed: %v", err)
+	}
+
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.vtt"), "ocr vtt")
+}
+
 func TestMediaTitleFromJob(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -287,16 +486,55 @@ func TestTargetLogFields(t *testing.T) {
 	}
 }
 
-func TestOutputFileNames(t *testing.T) {
-	got := outputFileNames(targetLanguage{OutputID: "jpn", Annotate: true})
-	want := []string{
-		"cueforge_jpn.ass",
-		"cueforge_jpn.vtt",
-		"cueforge_jpn_annotated.ass",
-		"cueforge_jpn_annotated.vtt",
+func TestExpectedOutputFileNames(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  subtitleCandidate
+		target targetLanguage
+		want   []string
+	}{
+		{
+			name:   "sup includes OCR originals",
+			input:  subtitleCandidate{Name: "4-eng.sup", LanguageID: "eng"},
+			target: targetLanguage{OutputID: "jpn", Annotate: true},
+			want: []string{
+				"cueforge_jpn.ass",
+				"cueforge_jpn.vtt",
+				"cueforge_jpn_annotated.ass",
+				"cueforge_jpn_annotated.vtt",
+				"cueforge_eng.ass",
+				"cueforge_eng.vtt",
+			},
+		},
+		{
+			name:   "text sub excludes OCR originals",
+			input:  subtitleCandidate{Name: "5-eng.sub", LanguageID: "eng"},
+			target: targetLanguage{OutputID: "jpn"},
+			want: []string{
+				"cueforge_jpn.ass",
+				"cueforge_jpn.vtt",
+			},
+		},
+		{
+			name:   "vobsub includes OCR originals",
+			input:  subtitleCandidate{Name: "5-eng.sub", LanguageID: "eng", IdxPath: "/tmp/5-eng.idx"},
+			target: targetLanguage{OutputID: "jpn"},
+			want: []string{
+				"cueforge_jpn.ass",
+				"cueforge_jpn.vtt",
+				"cueforge_eng.ass",
+				"cueforge_eng.vtt",
+			},
+		},
 	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("outputFileNames = %#v, want %#v", got, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := expectedOutputFileNames(tt.input, tt.target)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("expectedOutputFileNames = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 
