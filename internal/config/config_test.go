@@ -14,7 +14,6 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	t.Setenv("CUEFORGE_MODEL", " model-test ")
 	t.Setenv("CUEFORGE_VMODEL", " vision-test ")
 	t.Setenv("CUEFORGE_REASONING_EFFORT", " medium ")
-	t.Setenv("CUEFORGE_MEDIA", " episode title ")
 	t.Setenv("CUEFORGE_REQUEST_TIMEOUT", "90s")
 
 	cfg, err := Load()
@@ -33,7 +32,7 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	if len(cfg.TargetLanguages) != 2 || cfg.TargetLanguages[0] != "chi" || cfg.TargetLanguages[1] != "$fra" {
 		t.Fatalf("TargetLanguages = %#v, want trimmed raw target list", cfg.TargetLanguages)
 	}
-	if cfg.Model != "model-test" || cfg.VisionModel != "vision-test" || cfg.ReasoningEffort != "medium" || cfg.Media != "episode title" {
+	if cfg.Model != "model-test" || cfg.VisionModel != "vision-test" || cfg.ReasoningEffort != "medium" {
 		t.Fatalf("string fields not trimmed: %#v", cfg)
 	}
 	if cfg.RequestTimeout != 90*time.Second {

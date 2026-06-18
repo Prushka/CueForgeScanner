@@ -19,7 +19,6 @@ type Config struct {
 	Model           string        `json:"model" env:"CUEFORGE_MODEL"`
 	VisionModel     string        `json:"vision_model" env:"CUEFORGE_VMODEL"`
 	ReasoningEffort string        `json:"reasoning_effort" env:"CUEFORGE_REASONING_EFFORT"`
-	Media           string        `json:"media" env:"CUEFORGE_MEDIA"`
 	RequestTimeout  time.Duration `json:"request_timeout" env:"CUEFORGE_REQUEST_TIMEOUT" envDefault:"0s"`
 }
 
@@ -45,7 +44,6 @@ func normalize(cfg *Config) error {
 	cfg.Model = strings.TrimSpace(cfg.Model)
 	cfg.VisionModel = strings.TrimSpace(cfg.VisionModel)
 	cfg.ReasoningEffort = strings.TrimSpace(cfg.ReasoningEffort)
-	cfg.Media = strings.TrimSpace(cfg.Media)
 
 	if cfg.CueForgeBaseURL == "" {
 		return errors.New("CUEFORGE_BASE_URL cannot be empty")

@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"CueForgeScanner/internal/config"
 	"CueForgeScanner/internal/cueforge"
@@ -38,6 +40,41 @@ func TestChooseInputSubtitleUsesPriorityAliases(t *testing.T) {
 	}
 }
 
+func TestListScanFoldersSortsByLatestModTimeFirst(t *testing.T) {
+	dir := t.TempDir()
+	older := filepath.Join(dir, "older")
+	newer := filepath.Join(dir, "newer")
+	tieA := filepath.Join(dir, "alpha")
+	tieB := filepath.Join(dir, "beta")
+
+	for _, path := range []string{older, newer, tieA, tieB} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatalf("Mkdir(%s) failed: %v", path, err)
+		}
+	}
+
+	base := time.Unix(1_700_000_000, 0)
+	setDirModTime(t, older, base.Add(-2*time.Hour))
+	setDirModTime(t, newer, base)
+	setDirModTime(t, tieA, base.Add(-time.Hour))
+	setDirModTime(t, tieB, base.Add(-time.Hour))
+
+	folders, err := listScanFolders(dir)
+	if err != nil {
+		t.Fatalf("listScanFolders failed: %v", err)
+	}
+
+	got := make([]string, 0, len(folders))
+	for _, folder := range folders {
+		got = append(got, folder.Name)
+	}
+
+	want := []string{"newer", "alpha", "beta", "older"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("listScanFolders = %#v, want %#v", got, want)
+	}
+}
+
 func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "6-eng.ass")
@@ -59,6 +96,7 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 		assertFormValue(t, r, "input_language", "eng")
 		assertFormValue(t, r, "model", "gpt-test")
 		assertFormValue(t, r, "reasoning_effort", "medium")
+		assertFormValue(t, r, "media", "Episode title")
 		assertFormValues(t, r, "output_format", []string{"ass", "vtt"})
 
 		file, header, err := r.FormFile("file")
@@ -111,7 +149,7 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 		Annotate:     true,
 	}
 
-	if err := translateTarget(context.Background(), server.Client(), cfg, dir, input, target); err != nil {
+	if err := translateTarget(context.Background(), server.Client(), cfg, dir, "Episode title", input, target); err != nil {
 		t.Fatalf("translateTarget failed: %v", err)
 	}
 	if !requestSeen {
@@ -124,10 +162,59 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn_annotated.vtt"), "annotated vtt")
 }
 
+func TestMediaTitleFromJob(t *testing.T) {
+	tests := []struct {
+		name    string
+		jobJSON string
+		want    string
+	}{
+		{
+			name:    "title",
+			jobJSON: `{"media":{"title":"  Teachings of the Witch WEBRip-2160p  "}}`,
+			want:    "Teachings of the Witch WEBRip-2160p",
+		},
+		{
+			name:    "null media",
+			jobJSON: `{"media":null}`,
+		},
+		{
+			name:    "blank title",
+			jobJSON: `{"media":{"title":"   "}}`,
+		},
+		{
+			name:    "invalid json",
+			jobJSON: `{`,
+		},
+		{
+			name: "missing job",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.jobJSON != "" {
+				writeTestFile(t, filepath.Join(dir, "job.json"), tt.jobJSON)
+			}
+
+			if got := mediaTitleFromJob(dir); got != tt.want {
+				t.Fatalf("mediaTitleFromJob = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s) failed: %v", path, err)
+	}
+}
+
+func setDirModTime(t *testing.T, path string, modTime time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("Chtimes(%s) failed: %v", path, err)
 	}
 }
 

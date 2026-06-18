@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"CueForgeScanner/internal/config"
 	"CueForgeScanner/internal/cueforge"
@@ -53,6 +54,20 @@ type translateOutput struct {
 	Content   string `json:"content"`
 }
 
+type jobMetadata struct {
+	Media *jobMediaMetadata `json:"media"`
+}
+
+type jobMediaMetadata struct {
+	Title string `json:"title"`
+}
+
+type scanFolder struct {
+	Name    string
+	Path    string
+	ModTime time.Time
+}
+
 func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Config, languages cueforge.Registry) error {
 	inputLanguages, err := resolveInputLanguages(cfg.InputLanguages, languages)
 	if err != nil {
@@ -63,35 +78,32 @@ func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Co
 		return err
 	}
 
-	entries, err := os.ReadDir(cfg.ScanDir)
+	folders, err := listScanFolders(cfg.ScanDir)
 	if err != nil {
-		return fmt.Errorf("read scan dir %s: %w", cfg.ScanDir, err)
+		return err
 	}
 
 	var failures []error
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		folder := filepath.Join(cfg.ScanDir, entry.Name())
-		input, err := chooseInputSubtitle(folder, inputLanguages, languages, rng)
+	for _, folder := range folders {
+		input, err := chooseInputSubtitle(folder.Path, inputLanguages, languages, rng)
 		if err != nil {
 			if errors.Is(err, errNoASSSubtitles) {
-				log.Printf("skip %s: no original .ass subtitles found", folder)
+				log.Printf("skip %s: no original .ass subtitles found", folder.Path)
 				continue
 			}
 			failures = append(failures, err)
 			continue
 		}
 
-		log.Printf("folder %s: selected %s", entry.Name(), input.Name)
+		mediaTitle := mediaTitleFromJob(folder.Path)
+		log.Printf("folder %s: selected %s", folder.Name, input.Name)
 		for _, target := range targetLanguages {
-			if err := translateTarget(ctx, client, cfg, folder, input, target); err != nil {
-				failures = append(failures, fmt.Errorf("%s -> %s: %w", entry.Name(), target.OutputID, err))
-				log.Printf("failed %s -> %s: %v", entry.Name(), target.OutputID, err)
+			if err := translateTarget(ctx, client, cfg, folder.Path, mediaTitle, input, target); err != nil {
+				failures = append(failures, fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err))
+				log.Printf("failed %s -> %s: %v", folder.Name, target.OutputID, err)
 				continue
 			}
-			log.Printf("folder %s: wrote cueforge_%s outputs", entry.Name(), target.OutputID)
+			log.Printf("folder %s: wrote cueforge_%s outputs", folder.Name, target.OutputID)
 		}
 	}
 
@@ -102,6 +114,37 @@ func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Co
 }
 
 var errNoASSSubtitles = errors.New("no original .ass subtitles found")
+
+func listScanFolders(scanDir string) ([]scanFolder, error) {
+	entries, err := os.ReadDir(scanDir)
+	if err != nil {
+		return nil, fmt.Errorf("read scan dir %s: %w", scanDir, err)
+	}
+
+	folders := make([]scanFolder, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("stat scan folder %s: %w", filepath.Join(scanDir, entry.Name()), err)
+		}
+		folders = append(folders, scanFolder{
+			Name:    entry.Name(),
+			Path:    filepath.Join(scanDir, entry.Name()),
+			ModTime: info.ModTime(),
+		})
+	}
+
+	sort.Slice(folders, func(i, j int) bool {
+		if folders[i].ModTime.Equal(folders[j].ModTime) {
+			return folders[i].Name < folders[j].Name
+		}
+		return folders[i].ModTime.After(folders[j].ModTime)
+	})
+	return folders, nil
+}
 
 func chooseInputSubtitle(folder string, priorities []inputLanguage, languages cueforge.Registry, rng *rand.Rand) (subtitleCandidate, error) {
 	candidates, err := listASSCandidates(folder, languages)
@@ -161,8 +204,8 @@ func listASSCandidates(folder string, languages cueforge.Registry) ([]subtitleCa
 	return candidates, nil
 }
 
-func translateTarget(ctx context.Context, client *http.Client, cfg config.Config, folder string, input subtitleCandidate, target targetLanguage) error {
-	payload, contentType, err := buildTranslateRequest(input, target, cfg)
+func translateTarget(ctx context.Context, client *http.Client, cfg config.Config, folder, mediaTitle string, input subtitleCandidate, target targetLanguage) error {
+	payload, contentType, err := buildTranslateRequest(input, target, cfg, mediaTitle)
 	if err != nil {
 		return err
 	}
@@ -201,7 +244,7 @@ func translateTarget(ctx context.Context, client *http.Client, cfg config.Config
 	return nil
 }
 
-func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg config.Config) (io.Reader, string, error) {
+func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg config.Config, mediaTitle string) (io.Reader, string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -241,8 +284,8 @@ func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg c
 			return nil, "", err
 		}
 	}
-	if cfg.Media != "" {
-		if err := writer.WriteField("media", cfg.Media); err != nil {
+	if mediaTitle != "" {
+		if err := writer.WriteField("media", mediaTitle); err != nil {
 			return nil, "", err
 		}
 	}
@@ -300,6 +343,21 @@ func saveTargetOutputs(folder string, target targetLanguage, outputs []translate
 		}
 	}
 	return nil
+}
+
+func mediaTitleFromJob(folder string) string {
+	data, err := os.ReadFile(filepath.Join(folder, "job.json"))
+	if err != nil {
+		return ""
+	}
+	var job jobMetadata
+	if err := json.Unmarshal(data, &job); err != nil {
+		return ""
+	}
+	if job.Media == nil {
+		return ""
+	}
+	return strings.TrimSpace(job.Media.Title)
 }
 
 func resolveInputLanguages(values []string, languages cueforge.Registry) ([]inputLanguage, error) {
