@@ -94,6 +94,20 @@ type lockedRand struct {
 	rng *rand.Rand
 }
 
+type keyedLocks struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+type folderLocks struct {
+	files           *keyedLocks
+	outputLanguages *keyedLocks
+	sharedMu        sync.Mutex
+	sharedWrites    map[string]struct{}
+}
+
+type translationLimiter chan struct{}
+
 func newLockedRand(rng *rand.Rand) *lockedRand {
 	return &lockedRand{rng: rng}
 }
@@ -102,6 +116,88 @@ func (r *lockedRand) Intn(n int) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.rng.Intn(n)
+}
+
+func newKeyedLocks() *keyedLocks {
+	return &keyedLocks{locks: map[string]*sync.Mutex{}}
+}
+
+func (l *keyedLocks) lock(key string) func() {
+	l.mu.Lock()
+	mu, ok := l.locks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		l.locks[key] = mu
+	}
+	l.mu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
+
+func newFolderLocks() *folderLocks {
+	return &folderLocks{
+		files:           newKeyedLocks(),
+		outputLanguages: newKeyedLocks(),
+		sharedWrites:    map[string]struct{}{},
+	}
+}
+
+func lockFile(locks *folderLocks, path string) func() {
+	if locks == nil {
+		return func() {}
+	}
+	return locks.files.lock(filepath.Clean(path))
+}
+
+func lockOutputLanguage(locks *folderLocks, outputID string) func() {
+	if locks == nil {
+		return func() {}
+	}
+	return locks.outputLanguages.lock(strings.ToLower(outputID))
+}
+
+func claimSharedWrite(locks *folderLocks, path string) bool {
+	if locks == nil {
+		return true
+	}
+	key := filepath.Clean(path)
+	locks.sharedMu.Lock()
+	defer locks.sharedMu.Unlock()
+	if _, ok := locks.sharedWrites[key]; ok {
+		return false
+	}
+	locks.sharedWrites[key] = struct{}{}
+	return true
+}
+
+func releaseSharedWrite(locks *folderLocks, path string) {
+	if locks == nil {
+		return
+	}
+	key := filepath.Clean(path)
+	locks.sharedMu.Lock()
+	delete(locks.sharedWrites, key)
+	locks.sharedMu.Unlock()
+}
+
+func newTranslationLimiter(concurrency int) translationLimiter {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	return make(translationLimiter, concurrency)
+}
+
+func (l translationLimiter) acquire(ctx context.Context) (func(), error) {
+	if l == nil {
+		return func() {}, nil
+	}
+	select {
+	case l <- struct{}{}:
+		return func() { <-l }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Config, languages cueforge.Registry) error {
@@ -149,6 +245,7 @@ func processFolders(ctx context.Context, client *http.Client, rng *lockedRand, c
 
 	tasks := make(chan folderTask)
 	results := make(chan folderResult, len(folders))
+	limiter := newTranslationLimiter(cfg.Concurrency)
 	var wg sync.WaitGroup
 	for worker := 0; worker < workerCount; worker++ {
 		wg.Add(1)
@@ -157,7 +254,7 @@ func processFolders(ctx context.Context, client *http.Client, rng *lockedRand, c
 			for task := range tasks {
 				results <- folderResult{
 					Index:  task.Index,
-					Errors: processFolder(ctx, client, rng, cfg, languages, inputLanguages, targetLanguages, task.Folder),
+					Errors: processFolder(ctx, client, rng, cfg, languages, inputLanguages, targetLanguages, task.Folder, limiter),
 				}
 			}
 		}()
@@ -180,7 +277,8 @@ func processFolders(ctx context.Context, client *http.Client, rng *lockedRand, c
 	return out
 }
 
-func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cfg config.Config, languages cueforge.Registry, inputLanguages []inputLanguage, targetLanguages []targetLanguage, folder scanFolder) []error {
+func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cfg config.Config, languages cueforge.Registry, inputLanguages []inputLanguage, targetLanguages []targetLanguage, folder scanFolder, limiter translationLimiter) []error {
+	locks := newFolderLocks()
 	input, err := chooseInputSubtitle(folder.Path, inputLanguages, languages, rng)
 	if err != nil {
 		if errors.Is(err, errNoSupportedSubtitles) {
@@ -191,30 +289,81 @@ func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cf
 	}
 
 	var failures []error
-	mediaTitle := mediaTitleFromJob(folder.Path)
+	mediaTitle := mediaTitleFromJob(folder.Path, locks)
 	if mediaTitle != "" {
 		log.Printf("folder %s: selected input=%s input_language=%s media=%q targets=%d", folder.Name, input.Name, inputLanguageLogValue(input), mediaTitle, len(targetLanguages))
 	} else {
 		log.Printf("folder %s: selected input=%s input_language=%s targets=%d", folder.Name, input.Name, inputLanguageLogValue(input), len(targetLanguages))
 	}
-	for _, target := range targetLanguages {
-		targetFields := targetLogFields(target)
-		expectedFiles := expectedOutputFileNames(input, target)
-		if allOutputFilesExist(folder.Path, expectedFiles) {
-			log.Printf("folder %s: skipping existing outputs %s files=%s", folder.Name, targetFields, strings.Join(expectedFiles, ","))
-			continue
+	results := processTargets(ctx, client, cfg, locks, folder, mediaTitle, input, targetLanguages, limiter)
+	for _, result := range results {
+		if result.Err != nil {
+			failures = append(failures, result.Err)
 		}
-		log.Printf("folder %s: translating input=%s input_language=%s %s", folder.Name, input.Name, inputLanguageLogValue(input), targetFields)
-		if err := translateTarget(ctx, client, cfg, folder.Path, mediaTitle, input, target); err != nil {
-			failures = append(failures, fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err))
-			log.Printf("folder %s: failed input=%s %s: %v", folder.Name, input.Name, targetFields, err)
-			continue
-		}
-		log.Printf("folder %s: wrote outputs %s files=%s", folder.Name, targetFields, strings.Join(expectedFiles, ","))
 	}
 	if len(failures) > 0 {
 		return failures
 	}
+	return nil
+}
+
+type targetResult struct {
+	Index int
+	Err   error
+}
+
+func processTargets(ctx context.Context, client *http.Client, cfg config.Config, locks *folderLocks, folder scanFolder, mediaTitle string, input subtitleCandidate, targetLanguages []targetLanguage, limiter translationLimiter) []targetResult {
+	if len(targetLanguages) == 0 {
+		return nil
+	}
+
+	results := make(chan targetResult, len(targetLanguages))
+	var wg sync.WaitGroup
+	for i, target := range targetLanguages {
+		wg.Add(1)
+		go func(index int, target targetLanguage) {
+			defer wg.Done()
+			results <- targetResult{
+				Index: index,
+				Err:   processTarget(ctx, client, cfg, locks, folder, mediaTitle, input, target, limiter),
+			}
+		}(i, target)
+	}
+	wg.Wait()
+	close(results)
+
+	out := make([]targetResult, 0, len(targetLanguages))
+	for result := range results {
+		out = append(out, result)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Index < out[j].Index
+	})
+	return out
+}
+
+func processTarget(ctx context.Context, client *http.Client, cfg config.Config, locks *folderLocks, folder scanFolder, mediaTitle string, input subtitleCandidate, target targetLanguage, limiter translationLimiter) error {
+	unlockTarget := lockOutputLanguage(locks, target.OutputID)
+	defer unlockTarget()
+
+	targetFields := targetLogFields(target)
+	expectedFiles := expectedOutputFileNames(input, target)
+	if allOutputFilesExist(folder.Path, expectedFiles, locks) {
+		log.Printf("folder %s: skipping existing outputs %s files=%s", folder.Name, targetFields, strings.Join(expectedFiles, ","))
+		return nil
+	}
+	log.Printf("folder %s: translating input=%s input_language=%s %s", folder.Name, input.Name, inputLanguageLogValue(input), targetFields)
+	release, err := limiter.acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("%s -> %s: acquire translation slot: %w", folder.Name, target.OutputID, err)
+	}
+	defer release()
+	if err := translateTarget(ctx, client, cfg, locks, folder.Path, mediaTitle, input, target); err != nil {
+		err = fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err)
+		log.Printf("folder %s: failed input=%s %s: %v", folder.Name, input.Name, targetFields, err)
+		return err
+	}
+	log.Printf("folder %s: wrote outputs %s files=%s", folder.Name, targetFields, strings.Join(expectedFiles, ","))
 	return nil
 }
 
@@ -307,9 +456,13 @@ func appendUnique(values []string, next ...string) []string {
 	return values
 }
 
-func allOutputFilesExist(folder string, names []string) bool {
+func allOutputFilesExist(folder string, names []string, locks *folderLocks) bool {
 	for _, name := range names {
-		if _, err := os.Stat(filepath.Join(folder, name)); err != nil {
+		path := filepath.Join(folder, name)
+		unlock := lockFile(locks, path)
+		_, err := os.Stat(path)
+		unlock()
+		if err != nil {
 			return false
 		}
 	}
@@ -402,8 +555,8 @@ func listSubtitleCandidates(folder string, languages cueforge.Registry) ([]subti
 	return candidates, nil
 }
 
-func translateTarget(ctx context.Context, client *http.Client, cfg config.Config, folder, mediaTitle string, input subtitleCandidate, target targetLanguage) error {
-	payload, contentType, err := buildTranslateRequest(input, target, cfg, mediaTitle)
+func translateTarget(ctx context.Context, client *http.Client, cfg config.Config, locks *folderLocks, folder, mediaTitle string, input subtitleCandidate, target targetLanguage) error {
+	payload, contentType, err := buildTranslateRequest(input, target, cfg, locks, mediaTitle)
 	if err != nil {
 		return err
 	}
@@ -436,13 +589,13 @@ func translateTarget(ctx context.Context, client *http.Client, cfg config.Config
 		return errors.New("translate response did not include outputs")
 	}
 
-	if err := saveTargetOutputs(folder, input, target, decoded.Outputs); err != nil {
+	if err := saveTargetOutputs(folder, input, target, decoded.Outputs, locks); err != nil {
 		return err
 	}
 	return nil
 }
 
-func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg config.Config, mediaTitle string) (io.Reader, string, error) {
+func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg config.Config, locks *folderLocks, mediaTitle string) (io.Reader, string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -488,33 +641,13 @@ func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg c
 		}
 	}
 
-	file, err := os.Open(input.Path)
-	if err != nil {
-		return nil, "", fmt.Errorf("open input subtitle %s: %w", input.Path, err)
-	}
-	defer file.Close()
-
-	part, err := writer.CreateFormFile("file", input.Name)
-	if err != nil {
-		return nil, "", fmt.Errorf("create file part: %w", err)
-	}
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, "", fmt.Errorf("write file part: %w", err)
+	if err := writeFormFileFromPath(writer, "file", input.Path, input.Name, locks); err != nil {
+		return nil, "", err
 	}
 
 	if input.IdxPath != "" {
-		idxFile, err := os.Open(input.IdxPath)
-		if err != nil {
-			return nil, "", fmt.Errorf("open VobSub index %s: %w", input.IdxPath, err)
-		}
-		defer idxFile.Close()
-
-		idxPart, err := writer.CreateFormFile("idx", input.IdxName)
-		if err != nil {
-			return nil, "", fmt.Errorf("create idx part: %w", err)
-		}
-		if _, err := io.Copy(idxPart, idxFile); err != nil {
-			return nil, "", fmt.Errorf("write idx part: %w", err)
+		if err := writeFormFileFromPath(writer, "idx", input.IdxPath, input.IdxName, locks); err != nil {
+			return nil, "", err
 		}
 	}
 
@@ -524,7 +657,28 @@ func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg c
 	return &body, writer.FormDataContentType(), nil
 }
 
-func saveTargetOutputs(folder string, input subtitleCandidate, target targetLanguage, outputs []translateOutput) error {
+func writeFormFileFromPath(writer *multipart.Writer, field, path, name string, locks *folderLocks) error {
+	part, err := writer.CreateFormFile(field, name)
+	if err != nil {
+		return fmt.Errorf("create %s part: %w", field, err)
+	}
+
+	unlock := lockFile(locks, path)
+	defer unlock()
+
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s %s: %w", field, path, err)
+	}
+	defer file.Close()
+
+	if _, err := io.Copy(part, file); err != nil {
+		return fmt.Errorf("write %s part: %w", field, err)
+	}
+	return nil
+}
+
+func saveTargetOutputs(folder string, input subtitleCandidate, target targetLanguage, outputs []translateOutput, locks *folderLocks) error {
 	found := map[string]bool{}
 	for _, output := range outputs {
 		format := strings.ToLower(strings.TrimSpace(output.Format))
@@ -533,6 +687,7 @@ func saveTargetOutputs(folder string, input subtitleCandidate, target targetLang
 		}
 
 		var name string
+		writeOncePerRun := false
 		switch {
 		case output.OCROriginal || output.Variant == "ocr_original":
 			if input.LanguageID == "" {
@@ -540,6 +695,7 @@ func saveTargetOutputs(folder string, input subtitleCandidate, target targetLang
 			}
 			name = fmt.Sprintf("cueforge_%s.%s", input.LanguageID, format)
 			found["ocr:"+format] = true
+			writeOncePerRun = true
 		case output.Annotated || output.Variant == "annotated":
 			name = fmt.Sprintf("cueforge_%s_annotated.%s", target.OutputID, format)
 			found["annotated:"+format] = true
@@ -550,7 +706,7 @@ func saveTargetOutputs(folder string, input subtitleCandidate, target targetLang
 			continue
 		}
 
-		if err := os.WriteFile(filepath.Join(folder, name), []byte(output.Content), 0o644); err != nil {
+		if err := writeOutputFile(filepath.Join(folder, name), output.Content, locks, writeOncePerRun); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
@@ -569,8 +725,56 @@ func saveTargetOutputs(folder string, input subtitleCandidate, target targetLang
 	return nil
 }
 
-func mediaTitleFromJob(folder string) string {
-	data, err := os.ReadFile(filepath.Join(folder, "job.json"))
+func writeOutputFile(path, content string, locks *folderLocks, writeOncePerRun bool) (err error) {
+	if writeOncePerRun {
+		if !claimSharedWrite(locks, path) {
+			return nil
+		}
+		defer func() {
+			if err != nil {
+				releaseSharedWrite(locks, path)
+			}
+		}()
+	}
+
+	unlock := lockFile(locks, path)
+	defer unlock()
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp output: %w", err)
+	}
+	tmpName := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := io.WriteString(tmp, content); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp output: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp output: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp output: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp output: %w", err)
+	}
+	removeTemp = false
+	return nil
+}
+
+func mediaTitleFromJob(folder string, locks *folderLocks) string {
+	path := filepath.Join(folder, "job.json")
+	unlock := lockFile(locks, path)
+	data, err := os.ReadFile(path)
+	unlock()
 	if err != nil {
 		return ""
 	}
