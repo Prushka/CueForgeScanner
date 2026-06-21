@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -17,6 +19,8 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	t.Setenv("CUEFORGE_REQUEST_TIMEOUT", "90s")
 	t.Setenv("CUEFORGE_CONCURRENCY", "3")
 	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "1700000000")
+	t.Setenv("SAVE_ON_ERROR", "true")
+	t.Setenv("ERROR_DIR", " ~/cueforge-errors ")
 
 	cfg, err := Load()
 	if err != nil {
@@ -43,6 +47,12 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	if cfg.Concurrency != 3 {
 		t.Fatalf("Concurrency = %d, want 3", cfg.Concurrency)
 	}
+	if !cfg.SaveOnError {
+		t.Fatal("SaveOnError = false, want true")
+	}
+	if cfg.ErrorDir != filepath.Join(homeDir(t), "cueforge-errors") {
+		t.Fatalf("ErrorDir = %q, want expanded ~/cueforge-errors", cfg.ErrorDir)
+	}
 	if !cfg.SkipGeneratedAfter.Equal(time.Unix(1_700_000_000, 0)) {
 		t.Fatalf("SkipGeneratedAfter = %s, want Unix 1700000000", cfg.SkipGeneratedAfter)
 	}
@@ -52,6 +62,8 @@ func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
 	t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
 	t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
 	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
+	t.Setenv("ERROR_DIR", "")
+	unsetEnv(t, "SAVE_ON_ERROR")
 
 	before := time.Now()
 	cfg, err := Load()
@@ -61,6 +73,12 @@ func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
 	}
 	if cfg.SkipGeneratedAfter.Before(before) || cfg.SkipGeneratedAfter.After(after) {
 		t.Fatalf("SkipGeneratedAfter = %s, want between %s and %s", cfg.SkipGeneratedAfter, before, after)
+	}
+	if cfg.SaveOnError {
+		t.Fatal("SaveOnError = true, want default false")
+	}
+	if cfg.ErrorDir != "./errors" {
+		t.Fatalf("ErrorDir = %q, want ./errors", cfg.ErrorDir)
 	}
 }
 
@@ -83,4 +101,62 @@ func TestLoadRejectsInvalidSkipGeneratedAfter(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("Load succeeded, want invalid skip timestamp error")
 	}
+}
+
+func TestLoadParsesSaveOnErrorBool(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   string
+		want    bool
+		wantErr bool
+	}{
+		{name: "true", value: "true", want: true},
+		{name: "false", value: "false"},
+		{name: "on rejected", value: "on", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
+			t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
+			t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
+			t.Setenv("SAVE_ON_ERROR", tt.value)
+
+			cfg, err := Load()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load succeeded, want invalid save-on-error error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.SaveOnError != tt.want {
+				t.Fatalf("SaveOnError = %t, want %t", cfg.SaveOnError, tt.want)
+			}
+		})
+	}
+}
+
+func homeDir(t *testing.T) string {
+	t.Helper()
+	cfg, err := expandPath("~")
+	if err != nil {
+		t.Fatalf("expandPath(~) failed: %v", err)
+	}
+	return cfg
+}
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	old, ok := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("Unsetenv(%s) failed: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if ok {
+			_ = os.Setenv(key, old)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
 }

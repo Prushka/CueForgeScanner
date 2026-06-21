@@ -22,6 +22,8 @@ type Config struct {
 	ReasoningEffort    string        `json:"reasoning_effort" env:"CUEFORGE_REASONING_EFFORT"`
 	RequestTimeout     time.Duration `json:"request_timeout" env:"CUEFORGE_REQUEST_TIMEOUT" envDefault:"0s"`
 	Concurrency        int           `json:"concurrency" env:"CUEFORGE_CONCURRENCY" envDefault:"1"`
+	SaveOnError        bool          `json:"save_on_error" env:"SAVE_ON_ERROR" envDefault:"false"`
+	ErrorDir           string        `json:"error_dir" env:"ERROR_DIR" envDefault:"./errors"`
 	SkipGeneratedAfter time.Time     `json:"skip_generated_after"`
 }
 
@@ -60,6 +62,13 @@ func parseSkipGeneratedAfter(cfg *Config, value string, defaultTime time.Time) e
 func normalize(cfg *Config) error {
 	var err error
 	cfg.ScanDir, err = expandPath(cfg.ScanDir)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.ErrorDir) == "" {
+		cfg.ErrorDir = "./errors"
+	}
+	cfg.ErrorDir, err = expandPath(cfg.ErrorDir)
 	if err != nil {
 		return err
 	}

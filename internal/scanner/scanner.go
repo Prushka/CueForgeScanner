@@ -66,6 +66,43 @@ type translateOutput struct {
 	Content     string `json:"content"`
 }
 
+type translateRequestParameters struct {
+	TargetLanguage  string   `json:"target_language"`
+	Response        string   `json:"response"`
+	OutputFormat    []string `json:"output_format"`
+	Annotate        bool     `json:"annotate"`
+	InputLanguage   string   `json:"input_language,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	VisionModel     string   `json:"vmodel,omitempty"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	Media           string   `json:"media,omitempty"`
+}
+
+type translateRequestField struct {
+	Name  string
+	Value string
+}
+
+type failedSubtitleReport struct {
+	SourceFilename    string                     `json:"source_filename"`
+	SourcePath        string                     `json:"source_path,omitempty"`
+	IdxFilename       string                     `json:"idx_filename,omitempty"`
+	IdxPath           string                     `json:"idx_path,omitempty"`
+	MediaTitle        string                     `json:"media_title,omitempty"`
+	OriginalFolder    string                     `json:"original_folder"`
+	TargetLanguage    string                     `json:"target_language"`
+	Annotate          bool                       `json:"annotate"`
+	RequestParameters translateRequestParameters `json:"request_parameters"`
+	ErrorResponse     failedTranslateResponse    `json:"error_response"`
+}
+
+type failedTranslateResponse struct {
+	StatusCode int    `json:"status_code,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Body       string `json:"body,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
 type outputSaveMode int
 
 const (
@@ -755,23 +792,61 @@ func translateTargetWithSaveMode(ctx context.Context, client *http.Client, cfg c
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if saveErr := saveFailedSubtitleOnError(cfg, locks, folder, mediaTitle, input, target, failedTranslateResponse{Error: err.Error()}); saveErr != nil {
+			return fmt.Errorf("post translate request: %w; save failed subtitle: %v", err, saveErr)
+		}
 		return fmt.Errorf("post translate request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		errorResponse := failedTranslateResponse{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Error:      err.Error(),
+		}
+		if saveErr := saveFailedSubtitleOnError(cfg, locks, folder, mediaTitle, input, target, errorResponse); saveErr != nil {
+			return fmt.Errorf("read translate response: %w; save failed subtitle: %v", err, saveErr)
+		}
 		return fmt.Errorf("read translate response: %w", err)
 	}
+	bodyText := strings.TrimSpace(string(body))
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("translate returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		errorResponse := failedTranslateResponse{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       bodyText,
+		}
+		if saveErr := saveFailedSubtitleOnError(cfg, locks, folder, mediaTitle, input, target, errorResponse); saveErr != nil {
+			return fmt.Errorf("translate returned %s: %s; save failed subtitle: %w", resp.Status, errorResponse.Body, saveErr)
+		}
+		return fmt.Errorf("translate returned %s: %s", resp.Status, bodyText)
 	}
 
 	var decoded translateResponse
 	if err := json.Unmarshal(body, &decoded); err != nil {
+		errorResponse := failedTranslateResponse{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       bodyText,
+			Error:      err.Error(),
+		}
+		if saveErr := saveFailedSubtitleOnError(cfg, locks, folder, mediaTitle, input, target, errorResponse); saveErr != nil {
+			return fmt.Errorf("decode translate JSON: %w; save failed subtitle: %v", err, saveErr)
+		}
 		return fmt.Errorf("decode translate JSON: %w", err)
 	}
 	if len(decoded.Outputs) == 0 {
+		errorResponse := failedTranslateResponse{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       bodyText,
+			Error:      "translate response did not include outputs",
+		}
+		if saveErr := saveFailedSubtitleOnError(cfg, locks, folder, mediaTitle, input, target, errorResponse); saveErr != nil {
+			return fmt.Errorf("translate response did not include outputs; save failed subtitle: %w", saveErr)
+		}
 		return errors.New("translate response did not include outputs")
 	}
 
@@ -781,48 +856,149 @@ func translateTargetWithSaveMode(ctx context.Context, client *http.Client, cfg c
 	return nil
 }
 
+func translateRequestParametersFor(input subtitleCandidate, target targetLanguage, cfg config.Config, mediaTitle string) translateRequestParameters {
+	params := translateRequestParameters{
+		TargetLanguage: target.RequestValue,
+		Response:       "json",
+		OutputFormat:   []string{"ass", "vtt"},
+		Annotate:       target.Annotate,
+	}
+	if input.Language != nil && input.LanguageID != "" {
+		params.InputLanguage = input.LanguageID
+	}
+	if cfg.Model != "" {
+		params.Model = cfg.Model
+	}
+	if cfg.VisionModel != "" {
+		params.VisionModel = cfg.VisionModel
+	}
+	if cfg.ReasoningEffort != "" {
+		params.ReasoningEffort = cfg.ReasoningEffort
+	}
+	if mediaTitle != "" {
+		params.Media = mediaTitle
+	}
+	return params
+}
+
+func translateRequestFields(params translateRequestParameters) []translateRequestField {
+	fields := []translateRequestField{
+		{Name: "target_language", Value: params.TargetLanguage},
+		{Name: "response", Value: params.Response},
+	}
+	for _, format := range params.OutputFormat {
+		fields = append(fields, translateRequestField{Name: "output_format", Value: format})
+	}
+	if params.Annotate {
+		fields = append(fields, translateRequestField{Name: "annotate", Value: "true"})
+	}
+	if params.InputLanguage != "" {
+		fields = append(fields, translateRequestField{Name: "input_language", Value: params.InputLanguage})
+	}
+	if params.Model != "" {
+		fields = append(fields, translateRequestField{Name: "model", Value: params.Model})
+	}
+	if params.VisionModel != "" {
+		fields = append(fields, translateRequestField{Name: "vmodel", Value: params.VisionModel})
+	}
+	if params.ReasoningEffort != "" {
+		fields = append(fields, translateRequestField{Name: "reasoning_effort", Value: params.ReasoningEffort})
+	}
+	if params.Media != "" {
+		fields = append(fields, translateRequestField{Name: "media", Value: params.Media})
+	}
+	return fields
+}
+
+func saveFailedSubtitleOnError(cfg config.Config, locks *folderLocks, folder, mediaTitle string, input subtitleCandidate, target targetLanguage, errorResponse failedTranslateResponse) error {
+	if !cfg.SaveOnError {
+		return nil
+	}
+
+	sourceName := input.Name
+	if sourceName == "" {
+		sourceName = filepath.Base(input.Path)
+	}
+	idxName := input.IdxName
+	if idxName == "" && input.IdxPath != "" {
+		idxName = filepath.Base(input.IdxPath)
+	}
+
+	errorDir := strings.TrimSpace(cfg.ErrorDir)
+	if errorDir == "" {
+		errorDir = "./errors"
+	}
+	errorFolder := filepath.Join(errorDir, failedSubtitleFolderName(folder, mediaTitle))
+	if err := os.MkdirAll(errorFolder, 0o755); err != nil {
+		return fmt.Errorf("create error dir: %w", err)
+	}
+	if err := copyFileAtomic(input.Path, filepath.Join(errorFolder, sourceName), locks); err != nil {
+		return fmt.Errorf("copy failed subtitle: %w", err)
+	}
+	if input.IdxPath != "" {
+		if err := copyFileAtomic(input.IdxPath, filepath.Join(errorFolder, idxName), locks); err != nil {
+			return fmt.Errorf("copy failed subtitle idx: %w", err)
+		}
+	}
+
+	report := failedSubtitleReport{
+		SourceFilename:    sourceName,
+		SourcePath:        input.Path,
+		IdxFilename:       idxName,
+		IdxPath:           input.IdxPath,
+		MediaTitle:        strings.TrimSpace(mediaTitle),
+		OriginalFolder:    filepath.Base(folder),
+		TargetLanguage:    target.RequestValue,
+		Annotate:          target.Annotate,
+		RequestParameters: translateRequestParametersFor(input, target, cfg, mediaTitle),
+		ErrorResponse:     errorResponse,
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode failed subtitle report: %w", err)
+	}
+	if err := writeOutputFile(filepath.Join(errorFolder, sourceName+".json"), string(data)+"\n", locks, false); err != nil {
+		return fmt.Errorf("write failed subtitle report: %w", err)
+	}
+	log.Printf("saved failed subtitle input=%s target=%s dir=%s", sourceName, target.OutputID, errorFolder)
+	return nil
+}
+
+func failedSubtitleFolderName(folder, mediaTitle string) string {
+	name := strings.TrimSpace(mediaTitle)
+	if name == "" {
+		name = filepath.Base(folder)
+	}
+	return safePathComponent(name)
+}
+
+func safePathComponent(value string) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '/', '\\':
+			b.WriteByte('_')
+		default:
+			if r >= 0 && r < 32 {
+				continue
+			}
+			b.WriteRune(r)
+		}
+	}
+	value = strings.TrimSpace(b.String())
+	if value == "" || value == "." || value == ".." {
+		return "unknown"
+	}
+	return value
+}
+
 func buildTranslateRequest(input subtitleCandidate, target targetLanguage, cfg config.Config, locks *folderLocks, mediaTitle string) (io.Reader, string, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
-	if err := writer.WriteField("target_language", target.RequestValue); err != nil {
-		return nil, "", err
-	}
-	if err := writer.WriteField("response", "json"); err != nil {
-		return nil, "", err
-	}
-	for _, format := range []string{"ass", "vtt"} {
-		if err := writer.WriteField("output_format", format); err != nil {
-			return nil, "", err
-		}
-	}
-	if target.Annotate {
-		if err := writer.WriteField("annotate", "true"); err != nil {
-			return nil, "", err
-		}
-	}
-	if input.Language != nil && input.LanguageID != "" {
-		if err := writer.WriteField("input_language", input.LanguageID); err != nil {
-			return nil, "", err
-		}
-	}
-	if cfg.Model != "" {
-		if err := writer.WriteField("model", cfg.Model); err != nil {
-			return nil, "", err
-		}
-	}
-	if cfg.VisionModel != "" {
-		if err := writer.WriteField("vmodel", cfg.VisionModel); err != nil {
-			return nil, "", err
-		}
-	}
-	if cfg.ReasoningEffort != "" {
-		if err := writer.WriteField("reasoning_effort", cfg.ReasoningEffort); err != nil {
-			return nil, "", err
-		}
-	}
-	if mediaTitle != "" {
-		if err := writer.WriteField("media", mediaTitle); err != nil {
+	for _, field := range translateRequestFields(translateRequestParametersFor(input, target, cfg, mediaTitle)) {
+		if err := writer.WriteField(field.Name, field.Value); err != nil {
 			return nil, "", err
 		}
 	}
@@ -970,6 +1146,64 @@ func writeOutputFile(path, content string, locks *folderLocks, writeOncePerRun b
 	}
 	removeTemp = false
 	return nil
+}
+
+func copyFileAtomic(src, dst string, locks *folderLocks) (err error) {
+	if samePath(src, dst) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create destination dir: %w", err)
+	}
+
+	unlockSrc := lockFile(locks, src)
+	defer unlockSrc()
+	unlockDst := lockFile(locks, dst)
+	defer unlockDst()
+
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer in.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp copy: %w", err)
+	}
+	tmpName := tmp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp copy: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp copy: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp copy: %w", err)
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return fmt.Errorf("rename temp copy: %w", err)
+	}
+	removeTemp = false
+	return nil
+}
+
+func samePath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA == nil && errB == nil {
+		return absA == absB
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 func mediaTitleFromJob(folder string, locks *folderLocks) string {

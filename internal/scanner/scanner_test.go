@@ -599,6 +599,109 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn_annotated.vtt"), "annotated vtt")
 }
 
+func TestTranslateTargetSavesFailedSubtitleAndMetadataOnError(t *testing.T) {
+	dir := t.TempDir()
+	errorDir := t.TempDir()
+	inputPath := filepath.Join(dir, "2-eng.ass")
+	writeTestFile(t, inputPath, "subtitle")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		assertFormValue(t, r, "target_language", "jpn")
+		assertFormValue(t, r, "annotate", "true")
+		assertFormValue(t, r, "input_language", "eng")
+		http.Error(w, `{"error":"translation failed"}`, http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	registry := mustRegistry(t)
+	lang, ok := registry.Resolve("eng")
+	if !ok {
+		t.Fatal("Resolve(eng) failed")
+	}
+	input := subtitleCandidate{
+		Path:       inputPath,
+		Name:       "2-eng.ass",
+		LanguageID: "eng",
+		Language:   &lang,
+	}
+	cfg := config.Config{
+		CueForgeBaseURL: server.URL,
+		Model:           "gpt-test",
+		ReasoningEffort: "medium",
+		SaveOnError:     true,
+		ErrorDir:        errorDir,
+	}
+	target := targetLanguage{RequestValue: "jpn", OutputID: "jpn", Annotate: true}
+
+	err := translateTarget(context.Background(), server.Client(), cfg, newFolderLocks(), dir, "Episode/Title", input, target)
+	if err == nil {
+		t.Fatal("translateTarget succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "translate returned 500 Internal Server Error") {
+		t.Fatalf("translateTarget error = %v, want 500 status", err)
+	}
+
+	failedFolder := filepath.Join(errorDir, "Episode_Title")
+	assertFileContent(t, filepath.Join(failedFolder, "2-eng.ass"), "subtitle")
+
+	reportPath := filepath.Join(failedFolder, "2-eng.ass.json")
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) failed: %v", reportPath, err)
+	}
+	var report failedSubtitleReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("Unmarshal failed report failed: %v", err)
+	}
+	if report.SourceFilename != "2-eng.ass" || report.TargetLanguage != "jpn" || !report.Annotate {
+		t.Fatalf("report basic fields = %#v, want source, target, annotation", report)
+	}
+	if report.MediaTitle != "Episode/Title" || report.OriginalFolder != filepath.Base(dir) {
+		t.Fatalf("report folder fields = %#v, want media title and original folder", report)
+	}
+	if report.RequestParameters.TargetLanguage != "jpn" || !report.RequestParameters.Annotate || report.RequestParameters.InputLanguage != "eng" {
+		t.Fatalf("request parameters = %#v, want target, annotation, and input language", report.RequestParameters)
+	}
+	if !slices.Equal(report.RequestParameters.OutputFormat, []string{"ass", "vtt"}) {
+		t.Fatalf("output formats = %#v, want ass/vtt", report.RequestParameters.OutputFormat)
+	}
+	if report.RequestParameters.Model != "gpt-test" || report.RequestParameters.ReasoningEffort != "medium" || report.RequestParameters.Media != "Episode/Title" {
+		t.Fatalf("optional request parameters = %#v, want model/reasoning/media", report.RequestParameters)
+	}
+	if report.ErrorResponse.StatusCode != http.StatusInternalServerError || !strings.Contains(report.ErrorResponse.Body, "translation failed") {
+		t.Fatalf("error response = %#v, want 500 body", report.ErrorResponse)
+	}
+}
+
+func TestTranslateTargetSavesFailedSubtitleUnderOriginalFolderWhenMediaTitleMissing(t *testing.T) {
+	dir := t.TempDir()
+	errorDir := t.TempDir()
+	inputPath := filepath.Join(dir, "2-eng.ass")
+	writeTestFile(t, inputPath, "subtitle")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "translation failed", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	cfg := config.Config{CueForgeBaseURL: server.URL, SaveOnError: true, ErrorDir: errorDir}
+	target := targetLanguage{RequestValue: "jpn", OutputID: "jpn"}
+	input := subtitleCandidate{Path: inputPath, Name: "2-eng.ass", LanguageID: "eng"}
+
+	if err := translateTarget(context.Background(), server.Client(), cfg, newFolderLocks(), dir, "", input, target); err == nil {
+		t.Fatal("translateTarget succeeded, want error")
+	}
+
+	failedFolder := filepath.Join(errorDir, filepath.Base(dir))
+	assertFileContent(t, filepath.Join(failedFolder, "2-eng.ass"), "subtitle")
+	if _, err := os.Stat(filepath.Join(failedFolder, "2-eng.ass.json")); err != nil {
+		t.Fatalf("Stat failed report failed: %v", err)
+	}
+}
+
 func TestTranslateTargetSavesOCROriginalOutputsForImageInput(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "4-eng.sup")
