@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -358,7 +359,7 @@ func TestRunSkipsTargetWhenAllExpectedOutputsExist(t *testing.T) {
 	}
 }
 
-func TestRunDoesNotSkipWhenExpectedOutputsAreOlderThanCutoff(t *testing.T) {
+func TestRunSkipsUnannotatedTextTargetWhenPlainTargetExistsEvenIfOlderThanCutoff(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
 	cutoff := time.Unix(1_700_000_000, 0)
@@ -371,13 +372,7 @@ func TestRunDoesNotSkipWhenExpectedOutputsAreOlderThanCutoff(t *testing.T) {
 	requests := int64(0)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&requests, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(translateResponse{
-			Outputs: []translateOutput{
-				{Format: "ass", Variant: "translated", Content: "new ass"},
-				{Format: "vtt", Variant: "translated", Content: "new vtt"},
-			},
-		})
+		t.Fatalf("unexpected request to %s", r.URL.Path)
 	}))
 	defer server.Close()
 
@@ -385,14 +380,14 @@ func TestRunDoesNotSkipWhenExpectedOutputsAreOlderThanCutoff(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("processFolder errors = %#v, want none", errs)
 	}
-	if got := atomic.LoadInt64(&requests); got != 1 {
-		t.Fatalf("requests = %d, want 1", got)
+	if got := atomic.LoadInt64(&requests); got != 0 {
+		t.Fatalf("requests = %d, want 0", got)
 	}
-	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "new ass")
-	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "new vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "existing")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "existing")
 }
 
-func TestRunDoesNotSkipWhenExpectedOutputIsMissing(t *testing.T) {
+func TestRunSkipsUnannotatedTextTargetWhenAnyPlainTargetFormatExists(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
 	writeTestFile(t, filepath.Join(dir, "cueforge_jpn.ass"), "existing")
@@ -400,11 +395,106 @@ func TestRunDoesNotSkipWhenExpectedOutputIsMissing(t *testing.T) {
 	requests := int64(0)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&requests, 1)
+		t.Fatalf("unexpected request to %s", r.URL.Path)
+	}))
+	defer server.Close()
+
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn"}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 0 {
+		t.Fatalf("requests = %d, want 0", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "existing")
+	assertFileNotExists(t, filepath.Join(dir, "cueforge_jpn.vtt"))
+}
+
+func TestRunAnnotatesExistingTextTargetAndSavesOnlyAnnotatedOutputs(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "english")
+	writeTestFile(t, filepath.Join(dir, "cueforge_chi.ass"), "existing chinese")
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+
+		assertFormValue(t, r, "target_language", "chi")
+		assertFormValue(t, r, "annotate", "true")
+		assertFormValue(t, r, "input_language", "chi")
+		assertFormValues(t, r, "output_format", []string{"ass", "vtt"})
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile failed: %v", err)
+		}
+		defer file.Close()
+		if header.Filename != "cueforge_chi.ass" {
+			t.Fatalf("uploaded filename = %q, want cueforge_chi.ass", header.Filename)
+		}
+		body, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("ReadAll upload failed: %v", err)
+		}
+		if string(body) != "existing chinese" {
+			t.Fatalf("uploaded body = %q, want existing chinese", body)
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(translateResponse{
 			Outputs: []translateOutput{
-				{Format: "ass", Variant: "translated", Content: "new ass"},
-				{Format: "vtt", Variant: "translated", Content: "new vtt"},
+				{Format: "ass", Variant: "translated", Content: "plain ass"},
+				{Format: "vtt", Variant: "translated", Content: "plain vtt"},
+				{Format: "ass", Variant: "annotated", Annotated: true, Content: "annotated ass"},
+				{Format: "vtt", Variant: "annotated", Annotated: true, Content: "annotated vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "chi", OutputID: "chi", Annotate: true}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi.ass"), "existing chinese")
+	assertFileNotExists(t, filepath.Join(dir, "cueforge_chi.vtt"))
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.ass"), "annotated ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.vtt"), "annotated vtt")
+}
+
+func TestRunDoesNotUseExistingTextTargetShortcutForOCRInput(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "4-eng.sup"), "image subtitle")
+	writeTestFile(t, filepath.Join(dir, "cueforge_jpn.ass"), "existing")
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile failed: %v", err)
+		}
+		defer file.Close()
+		if header.Filename != "4-eng.sup" {
+			t.Fatalf("uploaded filename = %q, want 4-eng.sup", header.Filename)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "translated ass"},
+				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
+				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
 			},
 		})
 	}))
@@ -417,7 +507,9 @@ func TestRunDoesNotSkipWhenExpectedOutputIsMissing(t *testing.T) {
 	if got := atomic.LoadInt64(&requests); got != 1 {
 		t.Fatalf("requests = %d, want 1", got)
 	}
-	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "new vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
 }
 
 func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
@@ -845,6 +937,15 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if !bytes.Equal(got, []byte(want)) {
 		t.Fatalf("%s = %q, want %q", path, got, want)
+	}
+}
+
+func assertFileNotExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("%s exists, want missing", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat(%s) failed: %v", path, err)
 	}
 }
 
