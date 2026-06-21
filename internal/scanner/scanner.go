@@ -201,6 +201,8 @@ func (l translationLimiter) acquire(ctx context.Context) (func(), error) {
 }
 
 func Run(ctx context.Context, client *http.Client, rng *rand.Rand, cfg config.Config, languages cueforge.Registry) error {
+	cfg = withDefaultSkipGeneratedAfter(cfg)
+
 	inputLanguages, err := resolveInputLanguages(cfg.InputLanguages, languages)
 	if err != nil {
 		return err
@@ -278,6 +280,8 @@ func processFolders(ctx context.Context, client *http.Client, rng *lockedRand, c
 }
 
 func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cfg config.Config, languages cueforge.Registry, inputLanguages []inputLanguage, targetLanguages []targetLanguage, folder scanFolder, limiter translationLimiter) []error {
+	cfg = withDefaultSkipGeneratedAfter(cfg)
+
 	locks := newFolderLocks()
 	input, err := chooseInputSubtitle(folder.Path, inputLanguages, languages, rng)
 	if err != nil {
@@ -305,6 +309,13 @@ func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cf
 		return failures
 	}
 	return nil
+}
+
+func withDefaultSkipGeneratedAfter(cfg config.Config) config.Config {
+	if cfg.SkipGeneratedAfter.IsZero() {
+		cfg.SkipGeneratedAfter = time.Now()
+	}
+	return cfg
 }
 
 type targetResult struct {
@@ -348,8 +359,8 @@ func processTarget(ctx context.Context, client *http.Client, cfg config.Config, 
 
 	targetFields := targetLogFields(target)
 	expectedFiles := expectedOutputFileNames(input, target)
-	if allOutputFilesExist(folder.Path, expectedFiles, locks) {
-		log.Printf("folder %s: skipping existing outputs %s files=%s", folder.Name, targetFields, strings.Join(expectedFiles, ","))
+	if allOutputFilesExistAfter(folder.Path, expectedFiles, cfg.SkipGeneratedAfter, locks) {
+		log.Printf("folder %s: skipping existing outputs %s generated_after=%s files=%s", folder.Name, targetFields, cfg.SkipGeneratedAfter.Format(time.RFC3339), strings.Join(expectedFiles, ","))
 		return nil
 	}
 	log.Printf("folder %s: translating input=%s input_language=%s %s", folder.Name, input.Name, inputLanguageLogValue(input), targetFields)
@@ -456,13 +467,16 @@ func appendUnique(values []string, next ...string) []string {
 	return values
 }
 
-func allOutputFilesExist(folder string, names []string, locks *folderLocks) bool {
+func allOutputFilesExistAfter(folder string, names []string, cutoff time.Time, locks *folderLocks) bool {
 	for _, name := range names {
 		path := filepath.Join(folder, name)
 		unlock := lockFile(locks, path)
-		_, err := os.Stat(path)
+		info, err := os.Stat(path)
 		unlock()
 		if err != nil {
+			return false
+		}
+		if !info.ModTime().After(cutoff) {
 			return false
 		}
 	}

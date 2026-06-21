@@ -315,8 +315,11 @@ func TestProcessFolderSerializesDuplicateTargetOutputs(t *testing.T) {
 func TestRunSkipsTargetWhenAllExpectedOutputsExist(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
+	cutoff := time.Unix(1_700_000_000, 0)
 	for _, name := range expectedOutputFileNames(subtitleCandidate{Name: "1-eng.ass", LanguageID: "eng"}, targetLanguage{OutputID: "jpn", Annotate: true}) {
-		writeTestFile(t, filepath.Join(dir, name), "existing")
+		path := filepath.Join(dir, name)
+		writeTestFile(t, path, "existing")
+		setFileModTime(t, path, cutoff.Add(time.Second))
 	}
 
 	requests := int64(0)
@@ -326,13 +329,47 @@ func TestRunSkipsTargetWhenAllExpectedOutputsExist(t *testing.T) {
 	}))
 	defer server.Close()
 
-	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn", Annotate: true}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL, SkipGeneratedAfter: cutoff}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn", Annotate: true}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
 	if len(errs) > 0 {
 		t.Fatalf("processFolder errors = %#v, want none", errs)
 	}
 	if got := atomic.LoadInt64(&requests); got != 0 {
 		t.Fatalf("requests = %d, want 0", got)
 	}
+}
+
+func TestRunDoesNotSkipWhenExpectedOutputsAreOlderThanCutoff(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
+	cutoff := time.Unix(1_700_000_000, 0)
+	for _, name := range expectedOutputFileNames(subtitleCandidate{Name: "1-eng.ass", LanguageID: "eng"}, targetLanguage{OutputID: "jpn"}) {
+		path := filepath.Join(dir, name)
+		writeTestFile(t, path, "existing")
+		setFileModTime(t, path, cutoff.Add(-time.Second))
+	}
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "new ass"},
+				{Format: "vtt", Variant: "translated", Content: "new vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL, SkipGeneratedAfter: cutoff}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn"}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "new ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "new vtt")
 }
 
 func TestRunDoesNotSkipWhenExpectedOutputIsMissing(t *testing.T) {
@@ -738,6 +775,13 @@ func writeTestFile(t *testing.T, path, content string) {
 }
 
 func setDirModTime(t *testing.T, path string, modTime time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("Chtimes(%s) failed: %v", path, err)
+	}
+}
+
+func setFileModTime(t *testing.T, path string, modTime time.Time) {
 	t.Helper()
 	if err := os.Chtimes(path, modTime, modTime); err != nil {
 		t.Fatalf("Chtimes(%s) failed: %v", path, err)

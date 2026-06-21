@@ -19,6 +19,7 @@ The scanner is configured with environment variables:
 | `CUEFORGE_REASONING_EFFORT` | No       |                                   | Optional CueForge `reasoning_effort` form field.                                                                                |
 | `CUEFORGE_REQUEST_TIMEOUT`  | No       | no timeout                        | Request timeout as a Go duration such as `30m` or `1800s`.                                                                      |
 | `CUEFORGE_CONCURRENCY`      | No       | `1`                               | Maximum number of concurrent CueForge translation requests across all folders and target languages.                              |
+| `CUEFORGE_SKIP_GENERATED_AFTER_UNIX` | No | current startup time              | Unix timestamp in seconds. Existing outputs only skip a target when every expected file exists and was modified after this time. |
 
 ## Usage
 
@@ -30,7 +31,7 @@ CUEFORGE_CONCURRENCY=2 \
 go run ./cmd/scanner
 ```
 
-The scanner processes child folders from newest to oldest by folder modification time, with up to `CUEFORGE_CONCURRENCY` CueForge translation requests active globally across folders and target languages. Target languages inside each active folder are scheduled concurrently; targets resolving to the same output language are serialized so their output files do not race. It uploads one selected subtitle using format order `ass`, `vtt`, `sup`, then `sub`, and always requests `ass` and `vtt` output formats from CueForge. If every file a target would generate already exists, that target is skipped. If a folder has a readable `job.json` with `media.title`, that title is sent as CueForge's `media` form field for translations from that folder.
+The scanner processes child folders from newest to oldest by folder modification time, with up to `CUEFORGE_CONCURRENCY` CueForge translation requests active globally across folders and target languages. Target languages inside each active folder are scheduled concurrently; targets resolving to the same output language are serialized so their output files do not race. It uploads one selected subtitle using format order `ass`, `vtt`, `sup`, then `sub`, and always requests `ass` and `vtt` output formats from CueForge. A target is skipped only when every file it would generate already exists and every file's modification time is after `CUEFORGE_SKIP_GENERATED_AFTER_UNIX`; when the env var is empty or unset, the cutoff is the scanner startup time. If a folder has a readable `job.json` with `media.title`, that title is sent as CueForge's `media` form field for translations from that folder.
 
 For a target such as `jpn`, files are written as:
 

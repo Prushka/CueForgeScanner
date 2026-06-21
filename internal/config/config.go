@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,15 +13,16 @@ import (
 )
 
 type Config struct {
-	ScanDir         string        `json:"scan_dir" env:"CUEFORGE_SCAN_DIR" envDefault:"~/GolandProjects/Sparkle/output"`
-	CueForgeBaseURL string        `json:"cueforge_base_url" env:"CUEFORGE_BASE_URL" envDefault:"http://localhost:8080"`
-	InputLanguages  []string      `json:"input_languages" env:"CUEFORGE_INPUT_LANGUAGES,required" envSeparator:","`
-	TargetLanguages []string      `json:"target_languages" env:"CUEFORGE_TARGET_LANGUAGES,required" envSeparator:","`
-	Model           string        `json:"model" env:"CUEFORGE_MODEL"`
-	VisionModel     string        `json:"vision_model" env:"CUEFORGE_VMODEL"`
-	ReasoningEffort string        `json:"reasoning_effort" env:"CUEFORGE_REASONING_EFFORT"`
-	RequestTimeout  time.Duration `json:"request_timeout" env:"CUEFORGE_REQUEST_TIMEOUT" envDefault:"0s"`
-	Concurrency     int           `json:"concurrency" env:"CUEFORGE_CONCURRENCY" envDefault:"1"`
+	ScanDir            string        `json:"scan_dir" env:"CUEFORGE_SCAN_DIR" envDefault:"~/GolandProjects/Sparkle/output"`
+	CueForgeBaseURL    string        `json:"cueforge_base_url" env:"CUEFORGE_BASE_URL" envDefault:"http://localhost:8080"`
+	InputLanguages     []string      `json:"input_languages" env:"CUEFORGE_INPUT_LANGUAGES,required" envSeparator:","`
+	TargetLanguages    []string      `json:"target_languages" env:"CUEFORGE_TARGET_LANGUAGES,required" envSeparator:","`
+	Model              string        `json:"model" env:"CUEFORGE_MODEL"`
+	VisionModel        string        `json:"vision_model" env:"CUEFORGE_VMODEL"`
+	ReasoningEffort    string        `json:"reasoning_effort" env:"CUEFORGE_REASONING_EFFORT"`
+	RequestTimeout     time.Duration `json:"request_timeout" env:"CUEFORGE_REQUEST_TIMEOUT" envDefault:"0s"`
+	Concurrency        int           `json:"concurrency" env:"CUEFORGE_CONCURRENCY" envDefault:"1"`
+	SkipGeneratedAfter time.Time     `json:"skip_generated_after"`
 }
 
 func Load() (Config, error) {
@@ -29,10 +31,30 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	if err := parseSkipGeneratedAfter(&cfg, os.Getenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX"), time.Now()); err != nil {
+		return Config{}, err
+	}
 	if err := normalize(&cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func parseSkipGeneratedAfter(cfg *Config, value string, defaultTime time.Time) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		cfg.SkipGeneratedAfter = defaultTime
+		return nil
+	}
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("CUEFORGE_SKIP_GENERATED_AFTER_UNIX must be a Unix timestamp in seconds: %w", err)
+	}
+	if seconds < 0 {
+		return errors.New("CUEFORGE_SKIP_GENERATED_AFTER_UNIX cannot be negative")
+	}
+	cfg.SkipGeneratedAfter = time.Unix(seconds, 0)
+	return nil
 }
 
 func normalize(cfg *Config) error {

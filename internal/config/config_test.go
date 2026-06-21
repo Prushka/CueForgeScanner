@@ -16,6 +16,7 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	t.Setenv("CUEFORGE_REASONING_EFFORT", " medium ")
 	t.Setenv("CUEFORGE_REQUEST_TIMEOUT", "90s")
 	t.Setenv("CUEFORGE_CONCURRENCY", "3")
+	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "1700000000")
 
 	cfg, err := Load()
 	if err != nil {
@@ -42,14 +43,44 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	if cfg.Concurrency != 3 {
 		t.Fatalf("Concurrency = %d, want 3", cfg.Concurrency)
 	}
+	if !cfg.SkipGeneratedAfter.Equal(time.Unix(1_700_000_000, 0)) {
+		t.Fatalf("SkipGeneratedAfter = %s, want Unix 1700000000", cfg.SkipGeneratedAfter)
+	}
+}
+
+func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
+	t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
+	t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
+	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
+
+	before := time.Now()
+	cfg, err := Load()
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.SkipGeneratedAfter.Before(before) || cfg.SkipGeneratedAfter.After(after) {
+		t.Fatalf("SkipGeneratedAfter = %s, want between %s and %s", cfg.SkipGeneratedAfter, before, after)
+	}
 }
 
 func TestLoadRejectsInvalidConcurrency(t *testing.T) {
 	t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
 	t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
 	t.Setenv("CUEFORGE_CONCURRENCY", "0")
+	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load succeeded, want invalid concurrency error")
+	}
+}
+
+func TestLoadRejectsInvalidSkipGeneratedAfter(t *testing.T) {
+	t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
+	t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
+	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "not-a-timestamp")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load succeeded, want invalid skip timestamp error")
 	}
 }
