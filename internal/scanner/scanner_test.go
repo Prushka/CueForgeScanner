@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,6 +61,25 @@ func TestChooseInputSubtitleUsesFormatOrder(t *testing.T) {
 	}
 	if selected.Name != "2-eng.ass" {
 		t.Fatalf("selected %q, want 2-eng.ass", selected.Name)
+	}
+}
+
+func TestChooseInputSubtitleUsesLargestSameLanguageFormat(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "2-eng.ass"), "small")
+	writeTestFile(t, filepath.Join(dir, "3-eng.ass"), strings.Repeat("large", 100))
+	writeTestFile(t, filepath.Join(dir, "1-eng.vtt"), strings.Repeat("larger vtt", 100))
+
+	priorities := []inputLanguage{
+		{Raw: "eng", IDs: map[string]struct{}{"eng": {}}},
+	}
+
+	selected, err := chooseInputSubtitle(dir, priorities, mustRegistry(t), rand.New(rand.NewSource(1)))
+	if err != nil {
+		t.Fatalf("chooseInputSubtitle failed: %v", err)
+	}
+	if selected.Name != "3-eng.ass" {
+		t.Fatalf("selected %q, want 3-eng.ass", selected.Name)
 	}
 }
 

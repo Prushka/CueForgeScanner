@@ -37,6 +37,7 @@ type subtitleCandidate struct {
 	Name       string
 	LanguageID string
 	Language   *cueforge.Language
+	Size       int64
 	IdxPath    string
 	IdxName    string
 }
@@ -536,6 +537,10 @@ func listSubtitleCandidates(folder string, languages cueforge.Registry) ([]subti
 		if _, ok := supportedInputSubtitleExtensions[ext]; !ok || strings.HasPrefix(strings.ToLower(name), "cueforge_") {
 			continue
 		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("stat subtitle candidate %s: %w", filepath.Join(folder, name), err)
+		}
 
 		langID := languageIDFromFilename(name)
 		var lang *cueforge.Language
@@ -547,6 +552,7 @@ func listSubtitleCandidates(folder string, languages cueforge.Registry) ([]subti
 			Name:       name,
 			LanguageID: langID,
 			Language:   lang,
+			Size:       info.Size(),
 		}
 		if ext == ".sub" {
 			idxPath := matchingVobSubIndexPath(candidate.Path)
@@ -564,9 +570,24 @@ func listSubtitleCandidates(folder string, languages cueforge.Registry) ([]subti
 		if iExt != jExt {
 			return iExt < jExt
 		}
+		iLang := candidateLanguageSortKey(candidates[i])
+		jLang := candidateLanguageSortKey(candidates[j])
+		if iLang != jLang {
+			return iLang < jLang
+		}
+		if candidates[i].Size != candidates[j].Size {
+			return candidates[i].Size > candidates[j].Size
+		}
 		return candidates[i].Name < candidates[j].Name
 	})
 	return candidates, nil
+}
+
+func candidateLanguageSortKey(candidate subtitleCandidate) string {
+	if candidate.Language != nil && len(candidate.Language.IDs) > 0 {
+		return strings.ToLower(candidate.Language.IDs[0])
+	}
+	return strings.ToLower(candidate.LanguageID)
 }
 
 func translateTarget(ctx context.Context, client *http.Client, cfg config.Config, locks *folderLocks, folder, mediaTitle string, input subtitleCandidate, target targetLanguage) error {
