@@ -957,11 +957,24 @@ func saveFailedSubtitleOnError(cfg config.Config, locks *folderLocks, folder, me
 	if err != nil {
 		return fmt.Errorf("encode failed subtitle report: %w", err)
 	}
-	if err := writeOutputFile(filepath.Join(errorFolder, sourceName+".json"), string(data)+"\n", locks, false); err != nil {
+	reportName := failedSubtitleReportFilename(sourceName, target)
+	if err := writeOutputFile(filepath.Join(errorFolder, reportName), string(data)+"\n", locks, false); err != nil {
 		return fmt.Errorf("write failed subtitle report: %w", err)
 	}
-	log.Printf("saved failed subtitle input=%s target=%s dir=%s", sourceName, target.OutputID, errorFolder)
+	log.Printf("saved failed subtitle input=%s target=%s report=%s dir=%s", sourceName, target.OutputID, reportName, errorFolder)
 	return nil
+}
+
+func failedSubtitleReportFilename(sourceName string, target targetLanguage) string {
+	targetName := strings.TrimSpace(target.OutputID)
+	if targetName == "" {
+		targetName = strings.TrimSpace(target.RequestValue)
+	}
+	targetName = safePathComponent(targetName)
+	if target.Annotate {
+		targetName += ".annotated"
+	}
+	return sourceName + "." + targetName + ".json"
 }
 
 func failedSubtitleFolderName(folder, mediaTitle string) string {

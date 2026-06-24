@@ -647,7 +647,7 @@ func TestTranslateTargetSavesFailedSubtitleAndMetadataOnError(t *testing.T) {
 	failedFolder := filepath.Join(errorDir, "Episode_Title")
 	assertFileContent(t, filepath.Join(failedFolder, "2-eng.ass"), "subtitle")
 
-	reportPath := filepath.Join(failedFolder, "2-eng.ass.json")
+	reportPath := filepath.Join(failedFolder, "2-eng.ass.jpn.annotated.json")
 	data, err := os.ReadFile(reportPath)
 	if err != nil {
 		t.Fatalf("ReadFile(%s) failed: %v", reportPath, err)
@@ -697,9 +697,62 @@ func TestTranslateTargetSavesFailedSubtitleUnderOriginalFolderWhenMediaTitleMiss
 
 	failedFolder := filepath.Join(errorDir, filepath.Base(dir))
 	assertFileContent(t, filepath.Join(failedFolder, "2-eng.ass"), "subtitle")
-	if _, err := os.Stat(filepath.Join(failedFolder, "2-eng.ass.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(failedFolder, "2-eng.ass.jpn.json")); err != nil {
 		t.Fatalf("Stat failed report failed: %v", err)
 	}
+}
+
+func TestTranslateTargetSavesTargetSpecificFailedSubtitleReports(t *testing.T) {
+	dir := t.TempDir()
+	errorDir := t.TempDir()
+	inputPath := filepath.Join(dir, "2-eng.ass")
+	writeTestFile(t, inputPath, "subtitle")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		target := r.FormValue("target_language")
+		http.Error(w, "translation failed for "+target, http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	input := subtitleCandidate{Path: inputPath, Name: "2-eng.ass", LanguageID: "eng"}
+	cfg := config.Config{CueForgeBaseURL: server.URL, SaveOnError: true, ErrorDir: errorDir}
+	locks := newFolderLocks()
+	for _, target := range []targetLanguage{
+		{RequestValue: "jpn", OutputID: "jpn"},
+		{RequestValue: "kor", OutputID: "kor"},
+	} {
+		if err := translateTarget(context.Background(), server.Client(), cfg, locks, dir, "", input, target); err == nil {
+			t.Fatalf("translateTarget target=%s succeeded, want error", target.OutputID)
+		}
+	}
+
+	failedFolder := filepath.Join(errorDir, filepath.Base(dir))
+	assertFileContent(t, filepath.Join(failedFolder, "2-eng.ass"), "subtitle")
+
+	reports := map[string]string{
+		"2-eng.ass.jpn.json": "jpn",
+		"2-eng.ass.kor.json": "kor",
+	}
+	for name, wantTarget := range reports {
+		data, err := os.ReadFile(filepath.Join(failedFolder, name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) failed: %v", name, err)
+		}
+		var report failedSubtitleReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			t.Fatalf("Unmarshal(%s) failed: %v", name, err)
+		}
+		if report.TargetLanguage != wantTarget || report.RequestParameters.TargetLanguage != wantTarget {
+			t.Fatalf("%s target fields = %#v, want %s", name, report, wantTarget)
+		}
+		if !strings.Contains(report.ErrorResponse.Body, wantTarget) {
+			t.Fatalf("%s error response = %#v, want target in body", name, report.ErrorResponse)
+		}
+	}
+	assertFileNotExists(t, filepath.Join(failedFolder, "2-eng.ass.json"))
 }
 
 func TestTranslateTargetSavesOCROriginalOutputsForImageInput(t *testing.T) {
@@ -925,6 +978,48 @@ func TestTargetLogFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := targetLogFields(tt.target); got != tt.want {
 				t.Fatalf("targetLogFields = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFailedSubtitleReportFilename(t *testing.T) {
+	tests := []struct {
+		name       string
+		sourceName string
+		target     targetLanguage
+		want       string
+	}{
+		{
+			name:       "plain target",
+			sourceName: "2-eng.ass",
+			target:     targetLanguage{RequestValue: "jpn", OutputID: "jpn"},
+			want:       "2-eng.ass.jpn.json",
+		},
+		{
+			name:       "annotated target",
+			sourceName: "2-eng.ass",
+			target:     targetLanguage{RequestValue: "jpn", OutputID: "jpn", Annotate: true},
+			want:       "2-eng.ass.jpn.annotated.json",
+		},
+		{
+			name:       "uses output id for alias",
+			sourceName: "2-eng.ass",
+			target:     targetLanguage{RequestValue: "French", OutputID: "fre"},
+			want:       "2-eng.ass.fre.json",
+		},
+		{
+			name:       "sanitizes request fallback",
+			sourceName: "2-eng.ass",
+			target:     targetLanguage{RequestValue: "bad/name"},
+			want:       "2-eng.ass.bad_name.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := failedSubtitleReportFilename(tt.sourceName, tt.target); got != tt.want {
+				t.Fatalf("failedSubtitleReportFilename = %q, want %q", got, tt.want)
 			}
 		})
 	}
