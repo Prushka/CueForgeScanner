@@ -19,6 +19,7 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	t.Setenv("CUEFORGE_REQUEST_TIMEOUT", "90s")
 	t.Setenv("CUEFORGE_CONCURRENCY", "3")
 	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "1700000000")
+	t.Setenv("CUEFORGE_SKIP_EXISTING_TARGET_FILES", "false")
 	t.Setenv("SAVE_ON_ERROR", "true")
 	t.Setenv("ERROR_DIR", " ~/cueforge-errors ")
 
@@ -56,6 +57,9 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	if !cfg.SkipGeneratedAfter.Equal(time.Unix(1_700_000_000, 0)) {
 		t.Fatalf("SkipGeneratedAfter = %s, want Unix 1700000000", cfg.SkipGeneratedAfter)
 	}
+	if cfg.ShouldSkipExistingTargetFiles() {
+		t.Fatal("ShouldSkipExistingTargetFiles = true, want false")
+	}
 }
 
 func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
@@ -63,6 +67,7 @@ func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
 	t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
 	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
 	t.Setenv("ERROR_DIR", "")
+	unsetEnv(t, "CUEFORGE_SKIP_EXISTING_TARGET_FILES")
 	unsetEnv(t, "SAVE_ON_ERROR")
 
 	before := time.Now()
@@ -79,6 +84,9 @@ func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
 	}
 	if cfg.ErrorDir != "./errors" {
 		t.Fatalf("ErrorDir = %q, want ./errors", cfg.ErrorDir)
+	}
+	if !cfg.ShouldSkipExistingTargetFiles() {
+		t.Fatal("ShouldSkipExistingTargetFiles = false, want default true")
 	}
 }
 
@@ -132,6 +140,40 @@ func TestLoadParsesSaveOnErrorBool(t *testing.T) {
 			}
 			if cfg.SaveOnError != tt.want {
 				t.Fatalf("SaveOnError = %t, want %t", cfg.SaveOnError, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadParsesSkipExistingTargetFilesBool(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   string
+		want    bool
+		wantErr bool
+	}{
+		{name: "true", value: "true", want: true},
+		{name: "false", value: "false"},
+		{name: "on rejected", value: "on", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
+			t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
+			t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
+			t.Setenv("CUEFORGE_SKIP_EXISTING_TARGET_FILES", tt.value)
+
+			cfg, err := Load()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Load succeeded, want invalid skip-existing-target-files error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.ShouldSkipExistingTargetFiles() != tt.want {
+				t.Fatalf("ShouldSkipExistingTargetFiles = %t, want %t", cfg.ShouldSkipExistingTargetFiles(), tt.want)
 			}
 		})
 	}

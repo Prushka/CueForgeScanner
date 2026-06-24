@@ -404,7 +404,8 @@ func processTarget(ctx context.Context, client *http.Client, cfg config.Config, 
 	defer unlockTarget()
 
 	targetFields := targetLogFields(target)
-	if !inputNeedsOCROriginalOutputs(input) {
+	skipExistingTargetFiles := cfg.ShouldSkipExistingTargetFiles()
+	if skipExistingTargetFiles && !inputNeedsOCROriginalOutputs(input) {
 		existingTargetInput, ok, err := chooseExistingTargetTextSubtitle(folder.Path, target, languages)
 		if err != nil {
 			return fmt.Errorf("%s -> %s: find existing target subtitle: %w", folder.Name, target.OutputID, err)
@@ -437,7 +438,7 @@ func processTarget(ctx context.Context, client *http.Client, cfg config.Config, 
 	}
 
 	expectedFiles := expectedOutputFileNames(input, target)
-	if allOutputFilesExistAfter(folder.Path, expectedFiles, cfg.SkipGeneratedAfter, locks) {
+	if skipExistingTargetFiles && allOutputFilesExistAfter(folder.Path, expectedFiles, cfg.SkipGeneratedAfter, locks) {
 		log.Printf("folder %s: skipping existing outputs %s generated_after=%s files=%s", folder.Name, targetFields, cfg.SkipGeneratedAfter.Format(time.RFC3339), strings.Join(expectedFiles, ","))
 		return nil
 	}

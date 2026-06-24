@@ -13,18 +13,19 @@ import (
 )
 
 type Config struct {
-	ScanDir            string        `json:"scan_dir" env:"CUEFORGE_SCAN_DIR" envDefault:"~/GolandProjects/Sparkle/output"`
-	CueForgeBaseURL    string        `json:"cueforge_base_url" env:"CUEFORGE_BASE_URL" envDefault:"http://localhost:8080"`
-	InputLanguages     []string      `json:"input_languages" env:"CUEFORGE_INPUT_LANGUAGES,required" envSeparator:","`
-	TargetLanguages    []string      `json:"target_languages" env:"CUEFORGE_TARGET_LANGUAGES,required" envSeparator:","`
-	Model              string        `json:"model" env:"CUEFORGE_MODEL"`
-	VisionModel        string        `json:"vision_model" env:"CUEFORGE_VMODEL"`
-	ReasoningEffort    string        `json:"reasoning_effort" env:"CUEFORGE_REASONING_EFFORT"`
-	RequestTimeout     time.Duration `json:"request_timeout" env:"CUEFORGE_REQUEST_TIMEOUT" envDefault:"0s"`
-	Concurrency        int           `json:"concurrency" env:"CUEFORGE_CONCURRENCY" envDefault:"1"`
-	SaveOnError        bool          `json:"save_on_error" env:"SAVE_ON_ERROR" envDefault:"false"`
-	ErrorDir           string        `json:"error_dir" env:"ERROR_DIR" envDefault:"./errors"`
-	SkipGeneratedAfter time.Time     `json:"skip_generated_after"`
+	ScanDir                 string        `json:"scan_dir" env:"CUEFORGE_SCAN_DIR" envDefault:"~/GolandProjects/Sparkle/output"`
+	CueForgeBaseURL         string        `json:"cueforge_base_url" env:"CUEFORGE_BASE_URL" envDefault:"http://localhost:8080"`
+	InputLanguages          []string      `json:"input_languages" env:"CUEFORGE_INPUT_LANGUAGES,required" envSeparator:","`
+	TargetLanguages         []string      `json:"target_languages" env:"CUEFORGE_TARGET_LANGUAGES,required" envSeparator:","`
+	Model                   string        `json:"model" env:"CUEFORGE_MODEL"`
+	VisionModel             string        `json:"vision_model" env:"CUEFORGE_VMODEL"`
+	ReasoningEffort         string        `json:"reasoning_effort" env:"CUEFORGE_REASONING_EFFORT"`
+	RequestTimeout          time.Duration `json:"request_timeout" env:"CUEFORGE_REQUEST_TIMEOUT" envDefault:"0s"`
+	Concurrency             int           `json:"concurrency" env:"CUEFORGE_CONCURRENCY" envDefault:"1"`
+	SkipExistingTargetFiles *bool         `json:"skip_existing_target_files" env:"CUEFORGE_SKIP_EXISTING_TARGET_FILES"`
+	SaveOnError             bool          `json:"save_on_error" env:"SAVE_ON_ERROR" envDefault:"false"`
+	ErrorDir                string        `json:"error_dir" env:"ERROR_DIR" envDefault:"./errors"`
+	SkipGeneratedAfter      time.Time     `json:"skip_generated_after"`
 }
 
 func Load() (Config, error) {
@@ -40,6 +41,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func (cfg Config) ShouldSkipExistingTargetFiles() bool {
+	return cfg.SkipExistingTargetFiles == nil || *cfg.SkipExistingTargetFiles
 }
 
 func parseSkipGeneratedAfter(cfg *Config, value string, defaultTime time.Time) error {

@@ -359,6 +359,51 @@ func TestRunSkipsTargetWhenAllExpectedOutputsExist(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotSkipExpectedOutputsWhenSkipExistingTargetFilesDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "4-eng.sup"), "image subtitle")
+	cutoff := time.Unix(1_700_000_000, 0)
+	for _, name := range expectedOutputFileNames(subtitleCandidate{Name: "4-eng.sup", LanguageID: "eng"}, targetLanguage{OutputID: "jpn"}) {
+		path := filepath.Join(dir, name)
+		writeTestFile(t, path, "existing")
+		setFileModTime(t, path, cutoff.Add(time.Second))
+	}
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		assertFormValue(t, r, "target_language", "jpn")
+		assertFormValue(t, r, "input_language", "eng")
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "translated ass"},
+				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
+				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	skipExistingTargetFiles := false
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL, SkipGeneratedAfter: cutoff, SkipExistingTargetFiles: &skipExistingTargetFiles}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn"}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.vtt"), "ocr vtt")
+}
+
 func TestRunSkipsUnannotatedTextTargetWhenPlainTargetExistsEvenIfOlderThanCutoff(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
@@ -385,6 +430,60 @@ func TestRunSkipsUnannotatedTextTargetWhenPlainTargetExistsEvenIfOlderThanCutoff
 	}
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "existing")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "existing")
+}
+
+func TestRunDoesNotSkipPlainTargetWhenSkipExistingTargetFilesDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
+	writeTestFile(t, filepath.Join(dir, "cueforge_jpn.ass"), "existing ass")
+	writeTestFile(t, filepath.Join(dir, "cueforge_jpn.vtt"), "existing vtt")
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+
+		assertFormValue(t, r, "target_language", "jpn")
+		assertFormValue(t, r, "input_language", "eng")
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile failed: %v", err)
+		}
+		defer file.Close()
+		if header.Filename != "1-eng.ass" {
+			t.Fatalf("uploaded filename = %q, want 1-eng.ass", header.Filename)
+		}
+		body, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("ReadAll upload failed: %v", err)
+		}
+		if string(body) != "subtitle" {
+			t.Fatalf("uploaded body = %q, want subtitle", body)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "translated ass"},
+				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	skipExistingTargetFiles := false
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL, SkipExistingTargetFiles: &skipExistingTargetFiles}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn"}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
 }
 
 func TestRunSkipsUnannotatedTextTargetWhenAnyPlainTargetFormatExists(t *testing.T) {
@@ -464,6 +563,66 @@ func TestRunAnnotatesExistingTextTargetAndSavesOnlyAnnotatedOutputs(t *testing.T
 	}
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi.ass"), "existing chinese")
 	assertFileNotExists(t, filepath.Join(dir, "cueforge_chi.vtt"))
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.ass"), "annotated ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.vtt"), "annotated vtt")
+}
+
+func TestRunDoesNotUseExistingTextTargetForAnnotatedTargetWhenSkipExistingTargetFilesDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "english")
+	writeTestFile(t, filepath.Join(dir, "cueforge_chi.ass"), "existing chinese")
+	writeTestFile(t, filepath.Join(dir, "cueforge_chi_annotated.ass"), "existing annotated ass")
+	writeTestFile(t, filepath.Join(dir, "cueforge_chi_annotated.vtt"), "existing annotated vtt")
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+
+		assertFormValue(t, r, "target_language", "chi")
+		assertFormValue(t, r, "annotate", "true")
+		assertFormValue(t, r, "input_language", "eng")
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile failed: %v", err)
+		}
+		defer file.Close()
+		if header.Filename != "1-eng.ass" {
+			t.Fatalf("uploaded filename = %q, want 1-eng.ass", header.Filename)
+		}
+		body, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("ReadAll upload failed: %v", err)
+		}
+		if string(body) != "english" {
+			t.Fatalf("uploaded body = %q, want english", body)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "plain ass"},
+				{Format: "vtt", Variant: "translated", Content: "plain vtt"},
+				{Format: "ass", Variant: "annotated", Annotated: true, Content: "annotated ass"},
+				{Format: "vtt", Variant: "annotated", Annotated: true, Content: "annotated vtt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	skipExistingTargetFiles := false
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), config.Config{CueForgeBaseURL: server.URL, SkipExistingTargetFiles: &skipExistingTargetFiles}, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "chi", OutputID: "chi", Annotate: true}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi.ass"), "plain ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi.vtt"), "plain vtt")
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.ass"), "annotated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.vtt"), "annotated vtt")
 }
