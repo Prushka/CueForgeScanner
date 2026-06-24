@@ -921,6 +921,21 @@ func TestMediaTitleFromJob(t *testing.T) {
 			want:    "Teachings of the Witch WEBRip-2160p",
 		},
 		{
+			name:    "title takes priority over input",
+			jobJSON: `{"media":{"title":"Episode title"},"input":"Filename title.mp4"}`,
+			want:    "Episode title",
+		},
+		{
+			name:    "input fallback strips extension",
+			jobJSON: `{"input":"Pursuit of Jade - S01E03 - Episode 3 WEBDL-2160p.mp4"}`,
+			want:    "Pursuit of Jade - S01E03 - Episode 3 WEBDL-2160p",
+		},
+		{
+			name:    "blank media title falls back to input",
+			jobJSON: `{"media":{"title":"   "},"input":"Pursuit of Jade - S01E03 - Episode 3 WEBDL-2160p.mp4"}`,
+			want:    "Pursuit of Jade - S01E03 - Episode 3 WEBDL-2160p",
+		},
+		{
 			name:    "null media",
 			jobJSON: `{"media":null}`,
 		},

@@ -112,6 +112,7 @@ const (
 
 type jobMetadata struct {
 	Media *jobMediaMetadata `json:"media"`
+	Input string            `json:"input"`
 }
 
 type jobMediaMetadata struct {
@@ -1231,10 +1232,20 @@ func mediaTitleFromJob(folder string, locks *folderLocks) string {
 	if err := json.Unmarshal(data, &job); err != nil {
 		return ""
 	}
-	if job.Media == nil {
+	if job.Media != nil {
+		if title := strings.TrimSpace(job.Media.Title); title != "" {
+			return title
+		}
+	}
+	return mediaTitleFromJobInput(job.Input)
+}
+
+func mediaTitleFromJobInput(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
 		return ""
 	}
-	return strings.TrimSpace(job.Media.Title)
+	return strings.TrimSpace(strings.TrimSuffix(input, filepath.Ext(input)))
 }
 
 func resolveInputLanguages(values []string, languages cueforge.Registry) ([]inputLanguage, error) {
