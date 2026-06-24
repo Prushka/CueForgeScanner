@@ -421,12 +421,12 @@ func processTarget(ctx context.Context, client *http.Client, cfg config.Config, 
 				log.Printf("folder %s: skipping existing annotated outputs %s generated_after=%s files=%s", folder.Name, targetFields, cfg.SkipGeneratedAfter.Format(time.RFC3339), strings.Join(expectedFiles, ","))
 				return nil
 			}
-			log.Printf("folder %s: annotating existing target-language input=%s input_language=%s %s", folder.Name, existingTargetInput.Name, inputLanguageLogValue(existingTargetInput), targetFields)
 			release, err := limiter.acquire(ctx)
 			if err != nil {
 				return fmt.Errorf("%s -> %s: acquire translation slot: %w", folder.Name, target.OutputID, err)
 			}
 			defer release()
+			log.Printf("folder %s: annotating existing target-language input=%s input_language=%s %s", folder.Name, existingTargetInput.Name, inputLanguageLogValue(existingTargetInput), targetFields)
 			if err := translateTargetWithSaveMode(ctx, client, cfg, locks, folder.Path, mediaTitle, existingTargetInput, target, saveAnnotatedOnlyOutputs); err != nil {
 				err = fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err)
 				log.Printf("folder %s: failed input=%s %s: %v", folder.Name, existingTargetInput.Name, targetFields, err)
@@ -442,12 +442,12 @@ func processTarget(ctx context.Context, client *http.Client, cfg config.Config, 
 		log.Printf("folder %s: skipping existing outputs %s generated_after=%s files=%s", folder.Name, targetFields, cfg.SkipGeneratedAfter.Format(time.RFC3339), strings.Join(expectedFiles, ","))
 		return nil
 	}
-	log.Printf("folder %s: translating input=%s input_language=%s %s", folder.Name, input.Name, inputLanguageLogValue(input), targetFields)
 	release, err := limiter.acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("%s -> %s: acquire translation slot: %w", folder.Name, target.OutputID, err)
 	}
 	defer release()
+	log.Printf("folder %s: translating input=%s input_language=%s %s", folder.Name, input.Name, inputLanguageLogValue(input), targetFields)
 	if err := translateTarget(ctx, client, cfg, locks, folder.Path, mediaTitle, input, target); err != nil {
 		err = fmt.Errorf("%s -> %s: %w", folder.Name, target.OutputID, err)
 		log.Printf("folder %s: failed input=%s %s: %v", folder.Name, input.Name, targetFields, err)
