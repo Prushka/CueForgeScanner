@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -16,6 +17,7 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	t.Setenv("CUEFORGE_MODEL", " model-test ")
 	t.Setenv("CUEFORGE_VMODEL", " vision-test ")
 	t.Setenv("CUEFORGE_REASONING_EFFORT", " medium ")
+	t.Setenv("CUEFORGE_OUTPUT_FORMATS", " srt, VTT, srt ")
 	t.Setenv("CUEFORGE_REQUEST_TIMEOUT", "90s")
 	t.Setenv("CUEFORGE_CONCURRENCY", "3")
 	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "1700000000")
@@ -41,6 +43,9 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	}
 	if cfg.Model != "model-test" || cfg.VisionModel != "vision-test" || cfg.ReasoningEffort != "medium" {
 		t.Fatalf("string fields not trimmed: %#v", cfg)
+	}
+	if !slices.Equal(cfg.OutputFormats, []string{"srt", "vtt"}) {
+		t.Fatalf("OutputFormats = %#v, want trimmed deduplicated formats", cfg.OutputFormats)
 	}
 	if cfg.RequestTimeout != 90*time.Second {
 		t.Fatalf("RequestTimeout = %s, want 90s", cfg.RequestTimeout)
@@ -84,6 +89,9 @@ func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
 	}
 	if cfg.ErrorDir != "./errors" {
 		t.Fatalf("ErrorDir = %q, want ./errors", cfg.ErrorDir)
+	}
+	if !slices.Equal(cfg.OutputFormats, []string{"ass", "vtt", "srt"}) {
+		t.Fatalf("OutputFormats = %#v, want default ass/vtt/srt", cfg.OutputFormats)
 	}
 	if !cfg.ShouldSkipExistingTargetFiles() {
 		t.Fatal("ShouldSkipExistingTargetFiles = false, want default true")
@@ -174,6 +182,27 @@ func TestLoadParsesSkipExistingTargetFilesBool(t *testing.T) {
 			}
 			if cfg.ShouldSkipExistingTargetFiles() != tt.want {
 				t.Fatalf("ShouldSkipExistingTargetFiles = %t, want %t", cfg.ShouldSkipExistingTargetFiles(), tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidOutputFormats(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value string
+	}{
+		{name: "empty item", value: "ass, ,srt"},
+		{name: "path separator", value: "ass,../srt"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
+			t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
+			t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
+			t.Setenv("CUEFORGE_OUTPUT_FORMATS", tt.value)
+
+			if _, err := Load(); err == nil {
+				t.Fatal("Load succeeded, want invalid output formats error")
 			}
 		})
 	}

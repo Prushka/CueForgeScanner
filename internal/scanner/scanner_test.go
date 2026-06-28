@@ -168,6 +168,7 @@ func TestRunLimitsConcurrentFolderProcessing(t *testing.T) {
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "plain ass"},
 				{Format: "vtt", Variant: "translated", Content: "plain vtt"},
+				{Format: "srt", Variant: "translated", Content: "plain srt"},
 			},
 		})
 	}))
@@ -219,6 +220,7 @@ func TestRunAppliesConcurrencyLimitToTargetLanguagesInSameFolder(t *testing.T) {
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: target + " ass"},
 				{Format: "vtt", Variant: "translated", Content: target + " vtt"},
+				{Format: "srt", Variant: "translated", Content: target + " srt"},
 			},
 		})
 	}))
@@ -275,6 +277,7 @@ func TestRunAppliesConcurrencyLimitAcrossFoldersAndTargets(t *testing.T) {
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: target + " ass"},
 				{Format: "vtt", Variant: "translated", Content: target + " vtt"},
+				{Format: "srt", Variant: "translated", Content: target + " srt"},
 			},
 		})
 	}))
@@ -313,6 +316,7 @@ func TestProcessFolderSerializesDuplicateTargetOutputs(t *testing.T) {
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "french ass"},
 				{Format: "vtt", Variant: "translated", Content: "french vtt"},
+				{Format: "srt", Variant: "translated", Content: "french srt"},
 			},
 		})
 	}))
@@ -383,8 +387,10 @@ func TestRunDoesNotSkipExpectedOutputsWhenSkipExistingTargetFilesDisabled(t *tes
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "translated ass"},
 				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "srt", Variant: "translated", Content: "translated srt"},
 				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
 				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
+				{Format: "srt", Variant: "ocr_original", OCROriginal: true, Content: "ocr srt"},
 			},
 		})
 	}))
@@ -400,8 +406,10 @@ func TestRunDoesNotSkipExpectedOutputsWhenSkipExistingTargetFilesDisabled(t *tes
 	}
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "translated srt")
 	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_eng.vtt"), "ocr vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.srt"), "ocr srt")
 }
 
 func TestRunSkipsUnannotatedTextTargetWhenPlainTargetExistsEvenIfOlderThanCutoff(t *testing.T) {
@@ -469,6 +477,7 @@ func TestRunDoesNotSkipPlainTargetWhenSkipExistingTargetFilesDisabled(t *testing
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "translated ass"},
 				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "srt", Variant: "translated", Content: "translated srt"},
 			},
 		})
 	}))
@@ -484,6 +493,7 @@ func TestRunDoesNotSkipPlainTargetWhenSkipExistingTargetFilesDisabled(t *testing
 	}
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "translated srt")
 }
 
 func TestRunSkipsUnannotatedTextTargetWhenAnyPlainTargetFormatExists(t *testing.T) {
@@ -509,6 +519,29 @@ func TestRunSkipsUnannotatedTextTargetWhenAnyPlainTargetFormatExists(t *testing.
 	assertFileNotExists(t, filepath.Join(dir, "cueforge_jpn.vtt"))
 }
 
+func TestRunSkipsUnannotatedTextTargetWhenConfiguredPlainFormatExists(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "subtitle")
+	writeTestFile(t, filepath.Join(dir, "cueforge_jpn.srt"), "existing")
+
+	requests := int64(0)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		t.Fatalf("unexpected request to %s", r.URL.Path)
+	}))
+	defer server.Close()
+
+	cfg := config.Config{CueForgeBaseURL: server.URL, OutputFormats: []string{"srt"}}
+	errs := processFolder(context.Background(), server.Client(), newLockedRand(rand.New(rand.NewSource(1))), cfg, mustRegistry(t), []inputLanguage{{Raw: "eng", IDs: map[string]struct{}{"eng": {}}}}, []targetLanguage{{RequestValue: "jpn", OutputID: "jpn"}}, scanFolder{Name: "episode", Path: dir}, newTranslationLimiter(1))
+	if len(errs) > 0 {
+		t.Fatalf("processFolder errors = %#v, want none", errs)
+	}
+	if got := atomic.LoadInt64(&requests); got != 0 {
+		t.Fatalf("requests = %d, want 0", got)
+	}
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "existing")
+}
+
 func TestRunAnnotatesExistingTextTargetAndSavesOnlyAnnotatedOutputs(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "1-eng.ass"), "english")
@@ -524,7 +557,7 @@ func TestRunAnnotatesExistingTextTargetAndSavesOnlyAnnotatedOutputs(t *testing.T
 		assertFormValue(t, r, "target_language", "chi")
 		assertFormValue(t, r, "annotate", "true")
 		assertFormValue(t, r, "input_language", "chi")
-		assertFormValues(t, r, "output_format", []string{"ass", "vtt"})
+		assertFormValues(t, r, "output_format", []string{"ass", "vtt", "srt"})
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
@@ -547,8 +580,10 @@ func TestRunAnnotatesExistingTextTargetAndSavesOnlyAnnotatedOutputs(t *testing.T
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "plain ass"},
 				{Format: "vtt", Variant: "translated", Content: "plain vtt"},
+				{Format: "srt", Variant: "translated", Content: "plain srt"},
 				{Format: "ass", Variant: "annotated", Annotated: true, Content: "annotated ass"},
 				{Format: "vtt", Variant: "annotated", Annotated: true, Content: "annotated vtt"},
+				{Format: "srt", Variant: "annotated", Annotated: true, Content: "annotated srt"},
 			},
 		})
 	}))
@@ -563,8 +598,10 @@ func TestRunAnnotatesExistingTextTargetAndSavesOnlyAnnotatedOutputs(t *testing.T
 	}
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi.ass"), "existing chinese")
 	assertFileNotExists(t, filepath.Join(dir, "cueforge_chi.vtt"))
+	assertFileNotExists(t, filepath.Join(dir, "cueforge_chi.srt"))
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.ass"), "annotated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.vtt"), "annotated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.srt"), "annotated srt")
 }
 
 func TestRunDoesNotUseExistingTextTargetForAnnotatedTargetWhenSkipExistingTargetFilesDisabled(t *testing.T) {
@@ -606,8 +643,10 @@ func TestRunDoesNotUseExistingTextTargetForAnnotatedTargetWhenSkipExistingTarget
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "plain ass"},
 				{Format: "vtt", Variant: "translated", Content: "plain vtt"},
+				{Format: "srt", Variant: "translated", Content: "plain srt"},
 				{Format: "ass", Variant: "annotated", Annotated: true, Content: "annotated ass"},
 				{Format: "vtt", Variant: "annotated", Annotated: true, Content: "annotated vtt"},
+				{Format: "srt", Variant: "annotated", Annotated: true, Content: "annotated srt"},
 			},
 		})
 	}))
@@ -623,8 +662,10 @@ func TestRunDoesNotUseExistingTextTargetForAnnotatedTargetWhenSkipExistingTarget
 	}
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi.ass"), "plain ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi.vtt"), "plain vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi.srt"), "plain srt")
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.ass"), "annotated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.vtt"), "annotated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_chi_annotated.srt"), "annotated srt")
 }
 
 func TestRunDoesNotUseExistingTextTargetShortcutForOCRInput(t *testing.T) {
@@ -652,8 +693,10 @@ func TestRunDoesNotUseExistingTextTargetShortcutForOCRInput(t *testing.T) {
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "translated ass"},
 				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "srt", Variant: "translated", Content: "translated srt"},
 				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
 				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
+				{Format: "srt", Variant: "ocr_original", OCROriginal: true, Content: "ocr srt"},
 			},
 		})
 	}))
@@ -668,7 +711,9 @@ func TestRunDoesNotUseExistingTextTargetShortcutForOCRInput(t *testing.T) {
 	}
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "translated srt")
 	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.srt"), "ocr srt")
 }
 
 func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
@@ -693,7 +738,7 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 		assertFormValue(t, r, "model", "gpt-test")
 		assertFormValue(t, r, "reasoning_effort", "medium")
 		assertFormValue(t, r, "media", "Episode title")
-		assertFormValues(t, r, "output_format", []string{"ass", "vtt"})
+		assertFormValues(t, r, "output_format", []string{"ass", "vtt", "srt"})
 
 		file, header, err := r.FormFile("file")
 		if err != nil {
@@ -718,6 +763,8 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 				{Format: "ass", Variant: "annotated", Annotated: true, Content: "annotated ass"},
 				{Format: "vtt", Variant: "translated", Content: "plain vtt"},
 				{Format: "vtt", Variant: "annotated", Annotated: true, Content: "annotated vtt"},
+				{Format: "srt", Variant: "translated", Content: "plain srt"},
+				{Format: "srt", Variant: "annotated", Annotated: true, Content: "annotated srt"},
 			},
 		})
 	}))
@@ -756,6 +803,45 @@ func TestTranslateTargetPostsCueForgeFieldsAndSavesOutputs(t *testing.T) {
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn_annotated.ass"), "annotated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "plain vtt")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn_annotated.vtt"), "annotated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "plain srt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn_annotated.srt"), "annotated srt")
+}
+
+func TestTranslateTargetUsesConfiguredOutputFormats(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "6-eng.ass")
+	writeTestFile(t, inputPath, "subtitle")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm failed: %v", err)
+		}
+		assertFormValues(t, r, "output_format", []string{"srt"})
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(translateResponse{
+			Outputs: []translateOutput{
+				{Format: "ass", Variant: "translated", Content: "ignored ass"},
+				{Format: "srt", Variant: "translated", Content: "plain srt"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := config.Config{
+		CueForgeBaseURL: server.URL,
+		OutputFormats:   []string{"srt"},
+	}
+	input := subtitleCandidate{Path: inputPath, Name: "6-eng.ass", LanguageID: "eng"}
+	target := targetLanguage{RequestValue: "jpn", OutputID: "jpn"}
+
+	if err := translateTarget(context.Background(), server.Client(), cfg, newFolderLocks(), dir, "", input, target); err != nil {
+		t.Fatalf("translateTarget failed: %v", err)
+	}
+
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "plain srt")
+	assertFileNotExists(t, filepath.Join(dir, "cueforge_jpn.ass"))
+	assertFileNotExists(t, filepath.Join(dir, "cueforge_jpn.vtt"))
 }
 
 func TestTranslateTargetSavesFailedSubtitleAndMetadataOnError(t *testing.T) {
@@ -824,8 +910,8 @@ func TestTranslateTargetSavesFailedSubtitleAndMetadataOnError(t *testing.T) {
 	if report.RequestParameters.TargetLanguage != "jpn" || !report.RequestParameters.Annotate || report.RequestParameters.InputLanguage != "eng" {
 		t.Fatalf("request parameters = %#v, want target, annotation, and input language", report.RequestParameters)
 	}
-	if !slices.Equal(report.RequestParameters.OutputFormat, []string{"ass", "vtt"}) {
-		t.Fatalf("output formats = %#v, want ass/vtt", report.RequestParameters.OutputFormat)
+	if !slices.Equal(report.RequestParameters.OutputFormat, []string{"ass", "vtt", "srt"}) {
+		t.Fatalf("output formats = %#v, want ass/vtt/srt", report.RequestParameters.OutputFormat)
 	}
 	if report.RequestParameters.Model != "gpt-test" || report.RequestParameters.ReasoningEffort != "medium" || report.RequestParameters.Media != "Episode/Title" {
 		t.Fatalf("optional request parameters = %#v, want model/reasoning/media", report.RequestParameters)
@@ -937,8 +1023,10 @@ func TestTranslateTargetSavesOCROriginalOutputsForImageInput(t *testing.T) {
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "translated ass"},
 				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "srt", Variant: "translated", Content: "translated srt"},
 				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
 				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
+				{Format: "srt", Variant: "ocr_original", OCROriginal: true, Content: "ocr srt"},
 			},
 		})
 	}))
@@ -964,8 +1052,10 @@ func TestTranslateTargetSavesOCROriginalOutputsForImageInput(t *testing.T) {
 
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "translated srt")
 	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_eng.vtt"), "ocr vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.srt"), "ocr srt")
 }
 
 func TestSaveTargetOutputsWritesSharedOCROriginalOncePerRun(t *testing.T) {
@@ -988,8 +1078,10 @@ func TestSaveTargetOutputsWritesSharedOCROriginalOncePerRun(t *testing.T) {
 			errs <- saveTargetOutputs(dir, input, target, []translateOutput{
 				{Format: "ass", Variant: "translated", Content: target.OutputID + " ass"},
 				{Format: "vtt", Variant: "translated", Content: target.OutputID + " vtt"},
+				{Format: "srt", Variant: "translated", Content: target.OutputID + " srt"},
 				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: ocr},
 				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: ocr},
+				{Format: "srt", Variant: "ocr_original", OCROriginal: true, Content: ocr},
 			}, locks)
 			atomic.AddInt64(&done, 1)
 		}(tt.target, tt.ocr)
@@ -1007,6 +1099,8 @@ func TestSaveTargetOutputsWritesSharedOCROriginalOncePerRun(t *testing.T) {
 
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "jpn ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_fre.ass"), "fre ass")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "jpn srt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_fre.srt"), "fre srt")
 	got, err := os.ReadFile(filepath.Join(dir, "cueforge_eng.ass"))
 	if err != nil {
 		t.Fatalf("ReadFile OCR output failed: %v", err)
@@ -1035,8 +1129,10 @@ func TestTranslateTargetSendsVobSubIndexAndSavesOCROriginalOutputs(t *testing.T)
 			Outputs: []translateOutput{
 				{Format: "ass", Variant: "translated", Content: "translated ass"},
 				{Format: "vtt", Variant: "translated", Content: "translated vtt"},
+				{Format: "srt", Variant: "translated", Content: "translated srt"},
 				{Format: "ass", Variant: "ocr_original", OCROriginal: true, Content: "ocr ass"},
 				{Format: "vtt", Variant: "ocr_original", OCROriginal: true, Content: "ocr vtt"},
+				{Format: "srt", Variant: "ocr_original", OCROriginal: true, Content: "ocr srt"},
 			},
 		})
 	}))
@@ -1064,8 +1160,10 @@ func TestTranslateTargetSendsVobSubIndexAndSavesOCROriginalOutputs(t *testing.T)
 
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.ass"), "translated ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.vtt"), "translated vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_jpn.srt"), "translated srt")
 	assertFileContent(t, filepath.Join(dir, "cueforge_eng.ass"), "ocr ass")
 	assertFileContent(t, filepath.Join(dir, "cueforge_eng.vtt"), "ocr vtt")
+	assertFileContent(t, filepath.Join(dir, "cueforge_eng.srt"), "ocr srt")
 }
 
 func TestMediaTitleFromJob(t *testing.T) {
@@ -1213,10 +1311,13 @@ func TestExpectedOutputFileNames(t *testing.T) {
 			want: []string{
 				"cueforge_jpn.ass",
 				"cueforge_jpn.vtt",
+				"cueforge_jpn.srt",
 				"cueforge_jpn_annotated.ass",
 				"cueforge_jpn_annotated.vtt",
+				"cueforge_jpn_annotated.srt",
 				"cueforge_eng.ass",
 				"cueforge_eng.vtt",
+				"cueforge_eng.srt",
 			},
 		},
 		{
@@ -1226,6 +1327,7 @@ func TestExpectedOutputFileNames(t *testing.T) {
 			want: []string{
 				"cueforge_jpn.ass",
 				"cueforge_jpn.vtt",
+				"cueforge_jpn.srt",
 			},
 		},
 		{
@@ -1235,8 +1337,10 @@ func TestExpectedOutputFileNames(t *testing.T) {
 			want: []string{
 				"cueforge_jpn.ass",
 				"cueforge_jpn.vtt",
+				"cueforge_jpn.srt",
 				"cueforge_eng.ass",
 				"cueforge_eng.vtt",
+				"cueforge_eng.srt",
 			},
 		},
 	}
