@@ -359,7 +359,7 @@ func processFolder(ctx context.Context, client *http.Client, rng *lockedRand, cf
 
 func withDefaultSkipGeneratedAfter(cfg config.Config) config.Config {
 	if cfg.SkipGeneratedAfter.IsZero() {
-		cfg.SkipGeneratedAfter = time.Now()
+		cfg.SkipGeneratedAfter = config.DefaultSkipGeneratedAfter()
 	}
 	return cfg
 }

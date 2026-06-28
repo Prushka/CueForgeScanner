@@ -67,7 +67,7 @@ func TestLoadUsesEnvTagsAndTrimsFields(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
+func TestLoadDefaultsSkipGeneratedAfterToUnixEpoch(t *testing.T) {
 	t.Setenv("CUEFORGE_INPUT_LANGUAGES", "eng")
 	t.Setenv("CUEFORGE_TARGET_LANGUAGES", "jpn")
 	t.Setenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX", "")
@@ -75,14 +75,12 @@ func TestLoadDefaultsSkipGeneratedAfterToNow(t *testing.T) {
 	unsetEnv(t, "CUEFORGE_SKIP_EXISTING_TARGET_FILES")
 	unsetEnv(t, "SAVE_ON_ERROR")
 
-	before := time.Now()
 	cfg, err := Load()
-	after := time.Now()
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-	if cfg.SkipGeneratedAfter.Before(before) || cfg.SkipGeneratedAfter.After(after) {
-		t.Fatalf("SkipGeneratedAfter = %s, want between %s and %s", cfg.SkipGeneratedAfter, before, after)
+	if !cfg.SkipGeneratedAfter.Equal(time.Unix(0, 0)) {
+		t.Fatalf("SkipGeneratedAfter = %s, want Unix epoch", cfg.SkipGeneratedAfter)
 	}
 	if cfg.SaveOnError {
 		t.Fatal("SaveOnError = true, want default false")

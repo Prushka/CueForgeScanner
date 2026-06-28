@@ -36,13 +36,17 @@ func DefaultOutputFormats() []string {
 	return []string{"ass", "vtt", "srt"}
 }
 
+func DefaultSkipGeneratedAfter() time.Time {
+	return time.Unix(0, 0)
+}
+
 func Load() (Config, error) {
 	cfg := Config{}
 	if err := env.Parse(&cfg); err != nil {
 		return Config{}, err
 	}
 
-	if err := parseSkipGeneratedAfter(&cfg, os.Getenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX"), time.Now()); err != nil {
+	if err := parseSkipGeneratedAfter(&cfg, os.Getenv("CUEFORGE_SKIP_GENERATED_AFTER_UNIX")); err != nil {
 		return Config{}, err
 	}
 	if err := normalize(&cfg); err != nil {
@@ -55,10 +59,10 @@ func (cfg Config) ShouldSkipExistingTargetFiles() bool {
 	return cfg.SkipExistingTargetFiles == nil || *cfg.SkipExistingTargetFiles
 }
 
-func parseSkipGeneratedAfter(cfg *Config, value string, defaultTime time.Time) error {
+func parseSkipGeneratedAfter(cfg *Config, value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		cfg.SkipGeneratedAfter = defaultTime
+		cfg.SkipGeneratedAfter = DefaultSkipGeneratedAfter()
 		return nil
 	}
 	seconds, err := strconv.ParseInt(value, 10, 64)
